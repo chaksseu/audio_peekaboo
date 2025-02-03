@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 import rp
-import src_audioldm.stable_diffusion as diff
+import src_audioldm.audioldm as ldm
 from src_audioldm.bilateral_blur import BilateralProxyBlur
 from src_audioldm.learnable_textures import (
     LearnableImageFourier,
@@ -20,7 +20,7 @@ from src_audioldm.learnable_textures import (
     LearnableImageRasterBilateral,
 )
 
-sd = diff.StableDiffusion('cuda','CompVis/stable-diffusion-v1-4')
+sd = ldm.AudioLDM('cuda')
 device = sd.device
 
 def make_learnable_image(height, width, num_channels, foreground=None, bilateral_kwargs={}, representation='fourier'):

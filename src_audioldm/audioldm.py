@@ -55,30 +55,7 @@ class AudioLDM(nn.Module):
         self.alphas_cumprod = self.scheduler.alphas_cumprod.to(self.device) # for convenience
         print(f'[INFO] audioldm.py: loaded AudioLDM!')
 
-    def get_text_embeddings(self, prompts: Union[str, List[str]]) -> torch.Tensor:
-        prompts = [prompts] if isinstance(prompts, str) else prompts
-
-        def get_embeddings(text_list):
-            tokens = self.tokenizer(
-                text_list,
-                padding='max_length',
-                max_length=self.tokenizer.model_max_length,
-                truncation=True,
-                return_tensors='pt'
-            ).input_ids
-            
-            with torch.no_grad():
-                return self.text_encoder(tokens.to(self.device))[0]
-
-        # Get text and unconditional embeddings
-        text_embeddings = get_embeddings(prompts)  # [B, 77, 768]
-        uncond_embeddings = get_embeddings([self.uncond_text] * len(prompts))  # [B, 77, 768]
-        assert (uncond_embeddings == uncond_embeddings[0][None]).all()  # All the same
-        
-        return torch.cat([uncond_embeddings, text_embeddings])  # First B rows: uncond, Last B rows: cond
-
-    def _encode_prompt(self, prompts: Union[str, List[str]], device, do_classifier_free_guidance=True) -> torch.Tensor:
-        
+    def _encode_prompt(self, prompts: Union[str, List[str]], do_classifier_free_guidance=True) -> torch.Tensor:
         # 1. Batch size 결정
         if prompts is not None and isinstance(prompts, str):
             batch_size = 1
@@ -95,7 +72,7 @@ class AudioLDM(nn.Module):
             truncation=True,
             return_tensors="pt",
         )
-        text_input_ids, attention_mask = text_inputs.input_ids.to(device), text_inputs.attention_mask.to(device)
+        text_input_ids, attention_mask = text_inputs.input_ids.to(self.device), text_inputs.attention_mask.to(self.device)
 
         # Truncation 경고
         untruncated_ids = self.tokenizer(prompts, padding="longest", return_tensors="pt").input_ids
@@ -104,9 +81,9 @@ class AudioLDM(nn.Module):
             logger.warning(f"The following part of your input was truncated because CLAP can only handle sequences up to {self.tokenizer.model_max_length} tokens: {removed_text}")
 
         # Text embedding 계산 및 정규화
-        prompt_embeds = self.text_encoder(text_input_ids.to(device), attention_mask=attention_mask.to(device)).text_embeds
+        prompt_embeds = self.text_encoder(text_input_ids.to(self.device), attention_mask=attention_mask.to(self.device)).text_embeds
         # additional L_2 normalization over each hidden-state
-        prompt_embeds = F.normalize(prompt_embeds, dim=-1).to(dtype=self.text_encoder.dtype, device=device)  # [B, 77, 768] >> ??
+        prompt_embeds = F.normalize(prompt_embeds, dim=-1).to(dtype=self.text_encoder.dtype, device=self.device)  # [B, 77, 768] >> ??
         print(prompt_embeds.shape)
 
         # 3. get unconditional embeddings for classifier free guidance
@@ -118,7 +95,7 @@ class AudioLDM(nn.Module):
                 truncation=True,
                 return_tensors="pt",
             )
-            uncond_input_ids, attention_mask = uncond_input.input_ids.to(device), uncond_input.attention_mask.to(device)
+            uncond_input_ids, attention_mask = uncond_input.input_ids.to(self.device), uncond_input.attention_mask.to(self.device)
             uncond_prompt_embeds = self.text_encoder(uncond_input_ids, attention_mask=attention_mask).text_embeds
             # additional L_2 normalization over each hidden-state
             uncond_prompt_embeds = F.normalize(uncond_prompt_embeds, dim=-1)  # [B, 77, 768] >> ??
@@ -163,14 +140,17 @@ class AudioLDM(nn.Module):
         latents = posterior.latent_dist.sample() * self.VAE_SCALING_FACTOR  # [B, 3, H, W]
         return latents
 
-    def get_input_from_dict(self, batch, key):
+    def encode_audios(self, audios:torch.Tensor) -> torch.Tensor:
+        audios
+
+    def get_input(self, batch, key):
         '''
         fname = batch["fname"]
-        text    batch["text"]
-        label_indices    batch["label_vector"]
-        waveform    batch["waveform"]
-        stft    batch["stft"]
-        fbank    batch["log_mel_spec"]
+        text = batch["text"]
+        label_indices = batch["label_vector"]
+        waveform = batch["waveform"]
+        stft = batch["stft"]
+        fbank = batch["log_mel_spec"]
         '''
         return_format = {
             "fname": batch["fname"],
@@ -184,15 +164,20 @@ class AudioLDM(nn.Module):
                 return_format[key] = batch[key]
         return return_format[key]
     
-    def get_input(
-        self,
-        batch,
-        k,
-        return_first_stage_encode=True,
-        return_decoding_output=False,
-        return_encoder_input=False,
-        return_encoder_output=False,
-        unconditional_prob_cfg=0.1,
-    ):
-        
-        x = self.get_input_from_dict(batch, k).to(self.device)
+    def get_input_2(self, batch, key):
+        x = self.get_input(batch, key).to(self.device)
+        encoder_posterior = self.vae.encode(x)
+
+        if hasattr(encoder_posterior, "sample"):  # sample() 메서드가 있는 경우 (DiagonalGaussianDistribution 타입)
+            unscaled_z = encoder_posterior.sample()
+        elif isinstance(encoder_posterior, torch.Tensor):  # 그냥 Tensor라면 그대로 사용
+            unscaled_z = encoder_posterior
+        else:
+            raise NotImplementedError(f"Unsupported encoder_posterior type: {type(encoder_posterior)}")
+
+        self.scale_factor = 1.0 / z.flatten().std()
+        z = self.scale_factor * unscaled_z
+        return z
+
+
+
