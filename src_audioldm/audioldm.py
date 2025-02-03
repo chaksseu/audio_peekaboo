@@ -162,3 +162,37 @@ class AudioLDM(nn.Module):
         posterior = self.vae.encode(imgs)
         latents = posterior.latent_dist.sample() * self.VAE_SCALING_FACTOR  # [B, 3, H, W]
         return latents
+
+    def get_input_from_dict(self, batch, key):
+        '''
+        fname = batch["fname"]
+        text    batch["text"]
+        label_indices    batch["label_vector"]
+        waveform    batch["waveform"]
+        stft    batch["stft"]
+        fbank    batch["log_mel_spec"]
+        '''
+        return_format = {
+            "fname": batch["fname"],
+            "text": list(batch["text"]),
+            "waveform": batch["waveform"].to(memory_format=torch.contiguous_format).float(),
+            "stft": batch["stft"].to(memory_format=torch.contiguous_format).float(),
+            "fbank": batch["log_mel_spec"].unsqueeze(1).to(memory_format=torch.contiguous_format).float(),
+        }
+        for key in batch.keys():
+            if key not in return_format.keys():
+                return_format[key] = batch[key]
+        return return_format[key]
+    
+    def get_input(
+        self,
+        batch,
+        k,
+        return_first_stage_encode=True,
+        return_decoding_output=False,
+        return_encoder_input=False,
+        return_encoder_output=False,
+        unconditional_prob_cfg=0.1,
+    ):
+        
+        x = self.get_input_from_dict(batch, k).to(self.device)
