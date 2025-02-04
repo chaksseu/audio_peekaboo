@@ -181,18 +181,32 @@ class AudioLDM(nn.Module):
         z = self.scale_factor * unscaled_z
         return z
 
-    def post_process(self, latents, output_type: Optional[str] = "np", return_dict: bool = True):
+    def post_process_from_latent(self, latents, output_type: Optional[str] = "np", return_dict: bool = True):
         mel_spectrogram = self.decode_latents(latents)
         audio = self.mel_spectrogram_to_waveform(mel_spectrogram)
         audio = audio[:, :self.original_waveform_length]
         
         if output_type == "np":
-            audio = audio.numpy()
+            audio = audio.detach().numpy()
         
         if not return_dict:
             return (audio,)
         return audio
     
+    def post_process_from_mel(self, mel_spectrogram, output_type: Optional[str] = "np", return_dict: bool = True):
+        audio = self.mel_spectrogram_to_waveform(mel_spectrogram)
+        if audio.dim() == 2:
+            audio = audio[:, :self.original_waveform_length]
+        else:
+            audio = audio[:self.original_waveform_length]
+        
+        if output_type == "np":
+            audio = audio.detach().numpy()
+        
+        if not return_dict:
+            return (audio,)
+        return audio
+
     def decode_latents(self, latents):
         latents = 1 / self.vae.config.scaling_factor * latents
         mel_spectrogram = self.vae.decode(latents).sample

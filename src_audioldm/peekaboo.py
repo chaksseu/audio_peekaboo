@@ -217,27 +217,6 @@ def run_peekaboo(target_text: str,
     
     alphas = pkboo.alphas()
 
-    def save_melspec_as_img(mel_tensor, save_path):
-        mel = mel_tensor.detach().cpu().numpy()
-        if mel.shape[0] > mel.shape[1]:
-            mel = mel.T  # (64, 1024)로 전치
-        height, width = mel.shape
-        aspect_ratio = width / height  # 1024/64 = 16
-        fig_width = 20  # 기준 가로 길이
-        fig_height = fig_width / aspect_ratio  # 20/16 = 1.25
-        if mel.min() < 0:
-            # min_, max_ = -11.5129, 3.4657
-            min_, max_ = mel.min(), mel.max()
-        else:
-            min_, max_ = 0, 1
-        plt.figure(figsize=(fig_width, fig_height))
-        plt.imshow(mel, aspect='auto', origin='lower', cmap='magma',
-                vmin=min_, vmax=max_)
-        plt.colorbar()
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=150)
-        plt.close()
-
     results = {
         "alphas":rp.as_numpy_array(alphas),
         
@@ -257,7 +236,6 @@ def run_peekaboo(target_text: str,
     output_folder = rp.make_folder('peekaboo_results/%s'%target_text)
     output_folder += '/%03i'%len(rp.get_subfolders(output_folder))
     save_peekaboo_results(results, output_folder, list_dummy)
-    print(f"Saved results at {output_folder}")
 
     mel_cpu = dataset['log_mel_spec'][0, ...].detach().cpu()
     save_melspec_as_img(mel_cpu, os.path.join(output_folder, "orign_mel.png"))
@@ -267,6 +245,42 @@ def run_peekaboo(target_text: str,
 
     mel_cpu = pkboo()['log_mel_spec'][0, ...].detach().cpu()
     save_melspec_as_img(mel_cpu, os.path.join(output_folder, "seped_mel.png"))
+
+    import soundfile as sf
+    mel = dataset['log_mel_spec'][0, ...].half()
+    audio = ldm.post_process_from_mel(mel)
+    sf.write(os.path.join(output_folder, "orign_audio.wav"), audio, 16000)
+
+    mel = pkboo(alphas=torch.Tensor([0.5]).to(device))['log_mel_spec'][0, ...].half()
+    audio = ldm.post_process_from_mel(mel)
+    sf.write(os.path.join(output_folder, "mixed_audio.wav"), audio, 16000)
+
+    mel = pkboo()['log_mel_spec'][0, ...].half()
+    audio = ldm.post_process_from_mel(mel)
+    sf.write(os.path.join(output_folder, "seped_audio.wav"), audio, 16000)
+    
+    print(f">> Saved results at {output_folder}!!!")
+
+def save_melspec_as_img(mel_tensor, save_path):
+    mel = mel_tensor.detach().cpu().numpy()
+    if mel.shape[0] > mel.shape[1]:
+        mel = mel.T  # (64, 1024)로 전치
+    height, width = mel.shape
+    aspect_ratio = width / height  # 1024/64 = 16
+    fig_width = 20  # 기준 가로 길이
+    fig_height = fig_width / aspect_ratio  # 20/16 = 1.25
+    if mel.min() < 0:
+        # min_, max_ = -11.5129, 3.4657
+        min_, max_ = mel.min(), mel.max()
+    else:
+        min_, max_ = 0, 1
+    plt.figure(figsize=(fig_width, fig_height))
+    plt.imshow(mel, aspect='auto', origin='lower', cmap='magma',
+            vmin=min_, vmax=max_)
+    plt.colorbar()
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
 
 def save_peekaboo_results(results, new_folder_path, list_dummy):
     import json
@@ -334,16 +348,16 @@ if __name__ == "__main__":
         'representation': 'raster',
     }
 
-    run_peekaboo(
-        target_text='Footsteps on a wooden floor', # 'A cat meowing',
-        audio_file_path="./best_samples/A_cat_meowing.wav",
-        GRAVITY=prms['G'],
-        NUM_ITER=prms['iter'],
-        LEARNING_RATE=prms['lr'],
-        BATCH_SIZE=prms['B'],
-        GUIDANCE_SCALE=prms['guidance'],
-        representation=prms['representation'],
-        )
+    # run_peekaboo(
+    #     target_text='Footsteps on a wooden floor', # 'A cat meowing',
+    #     audio_file_path="./best_samples/A_cat_meowing.wav",
+    #     GRAVITY=prms['G'],
+    #     NUM_ITER=prms['iter'],
+    #     LEARNING_RATE=prms['lr'],
+    #     BATCH_SIZE=prms['B'],
+    #     GUIDANCE_SCALE=prms['guidance'],
+    #     representation=prms['representation'],
+    #     )
     
     run_peekaboo(
         target_text='A cat meowing', # 'A cat meowing',
