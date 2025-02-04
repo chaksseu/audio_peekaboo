@@ -164,7 +164,7 @@ def run_peekaboo(target_text: str,
     }
     '''
     assert len(dataset['text']) == 1, 'Only one audio file is allowed'
-    assert dataset['text'][0] == target_text, 'Text does not match'
+    # assert dataset['text'][0] == target_text, 'Text does not match'
     if dataset['text'][0] != target_text:
         dataset['text'][0] = target_text
         print("Warning!: Text has been changed to match the target_text")
@@ -195,6 +195,7 @@ def run_peekaboo(target_text: str,
         
         loss = alphas.mean() * GRAVITY
         alphaloss = loss.item()
+        alphaloss = alphas.mean().item()
         # loss2 = torch.abs(alphas[:, 1:, :] - alphas[:, :-1, :]).mean() + torch.abs(alphas[:, :, 1:] - alphas[:, :, :-1]).mean()
         # loss += loss2 * 5000
         # print(loss2.item())
@@ -215,10 +216,30 @@ def run_peekaboo(target_text: str,
         pass
     
     alphas = pkboo.alphas()
+
+    def save_melspec_as_img(mel_tensor, save_path):
+        mel = mel_tensor.detach().cpu().numpy()
+        if mel.shape[0] > mel.shape[1]:
+            mel = mel.T  # (64, 1024)로 전치
+        height, width = mel.shape
+        aspect_ratio = width / height  # 1024/64 = 16
+        fig_width = 20  # 기준 가로 길이
+        fig_height = fig_width / aspect_ratio  # 20/16 = 1.25
+        if mel.min() < 0:
+            # min_, max_ = -11.5129, 3.4657
+            min_, max_ = mel.min(), mel.max()
+        else:
+            min_, max_ = 0, 1
+        plt.figure(figsize=(fig_width, fig_height))
+        plt.imshow(mel, aspect='auto', origin='lower', cmap='magma',
+                vmin=min_, vmax=max_)
+        plt.colorbar()
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150)
+        plt.close()
+
     results = {
-        "_image":rp.as_numpy_images(dataset["log_mel_spec"].unsqueeze(0).repeat(1,3,1,1)),
-        # "alphas":rp.as_numpy_array(alphas),
-        "output":rp.as_numpy_images(pkboo.dataset["log_mel_spec"].unsqueeze(0).detach().repeat(1,3,1,1).cpu().numpy()),  # rp.as_numpy_images(pkboo(pkboo.alphas())),
+        "alphas":rp.as_numpy_array(alphas),
         
         "representation":representation,
         "NUM_ITER":NUM_ITER,
@@ -237,6 +258,15 @@ def run_peekaboo(target_text: str,
     output_folder += '/%03i'%len(rp.get_subfolders(output_folder))
     save_peekaboo_results(results, output_folder, list_dummy)
     print(f"Saved results at {output_folder}")
+
+    mel_cpu = dataset['log_mel_spec'][0, ...].detach().cpu()
+    save_melspec_as_img(mel_cpu, os.path.join(output_folder, "orign_mel.png"))
+
+    mel_cpu = pkboo(alphas=torch.Tensor([0.5]).to(device))['log_mel_spec'][0, ...].detach().cpu()
+    save_melspec_as_img(mel_cpu, os.path.join(output_folder, "mixed_mel.png"))
+
+    mel_cpu = pkboo()['log_mel_spec'][0, ...].detach().cpu()
+    save_melspec_as_img(mel_cpu, os.path.join(output_folder, "seped_mel.png"))
 
 def save_peekaboo_results(results, new_folder_path, list_dummy):
     import json
@@ -297,15 +327,26 @@ if __name__ == "__main__":
     # raster 용도.
     prms = {
         'G': 0, # 3000,
-        'iter': 300,
-        'lr': 0.00001,
+        'iter': 100,
+        'lr': 0.0001,
         'B': 1,
         'guidance': 100,
         'representation': 'raster',
     }
 
     run_peekaboo(
-        target_text='A cat meowing',
+        target_text='Footsteps on a wooden floor', # 'A cat meowing',
+        audio_file_path="./best_samples/A_cat_meowing.wav",
+        GRAVITY=prms['G'],
+        NUM_ITER=prms['iter'],
+        LEARNING_RATE=prms['lr'],
+        BATCH_SIZE=prms['B'],
+        GUIDANCE_SCALE=prms['guidance'],
+        representation=prms['representation'],
+        )
+    
+    run_peekaboo(
+        target_text='A cat meowing', # 'A cat meowing',
         audio_file_path="./best_samples/A_cat_meowing.wav",
         GRAVITY=prms['G'],
         NUM_ITER=prms['iter'],
