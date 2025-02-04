@@ -12,157 +12,192 @@ import torch.nn as nn
 from tqdm import tqdm
 import rp
 import src_audioldm.audioldm as ldm
-from src_audioldm.bilateral_blur import BilateralProxyBlur
+from src_audioldm.utilities.data.dataset_pkb import AudioDataProcessor, spectral_normalize_torch
 from src_audioldm.learnable_textures import (
     LearnableImageFourier,
-    LearnableImageFourierBilateral,
     LearnableImageRasterSigmoided,
-    LearnableImageRasterBilateral,
 )
 
-sd = ldm.AudioLDM('cuda')
-device = sd.device
+ldm = ldm.AudioLDM('cuda')
+device = ldm.device
 
-def make_learnable_image(height, width, num_channels, foreground=None, bilateral_kwargs={}, representation='fourier'):
-    bilateral_blur = BilateralProxyBlur(foreground, **bilateral_kwargs)
+def make_learnable_image(height, width, num_channels, representation='fourier'):
     image_types = {
-        'fourier bilateral': LearnableImageFourierBilateral(bilateral_blur, num_channels),
-        'raster bilateral': LearnableImageRasterBilateral(bilateral_blur, num_channels),
         'fourier': LearnableImageFourier(height, width, num_channels),
-        'raster': LearnableImageRasterSigmoided(height, width, num_channels)
-    }
+        'raster': LearnableImageRasterSigmoided(height, width, num_channels)}
     return image_types.get(representation, ValueError(f'Invalid method: {representation}'))
 
 def blend_torch_images(foreground, background, alpha):
-    assert foreground.shape==background.shape
-    C,H,W=foreground.shape
-    assert alpha.shape==(H,W), 'alpha is a matrix'
-    return foreground*alpha + background*(1-alpha)
+    'When alpha is scaler'
+    return foreground * alpha + background * (1-alpha)
 
-def make_image_square(image: np.ndarray, method='crop') -> np.ndarray:
-    image = rp.as_rgb_image(image)
-    min_dim = min(image.shape[:2])
-    if method == 'crop':
-        image = rp.crop_image(image, min_dim, min_dim, origin='center')
-    return rp.resize_image(image, (512, 512))
+def masking_torch_image(foreground, alpha):
+    assert foreground.shape == alpha.shape, 'foreground shape != alpha shape'
+    assert alpha.min().item() >= 0 and alpha.max().item() <= 1, f'alpha range error {alpha.min().item()}, {alpha.max().item()}'
+    min_val = foreground.min()
+    blended = (foreground - min_val) * alpha + min_val
+    return blended
 
-class PeekabooSegmenter(nn.Module):
+class AudioPeekabooSeparator(nn.Module):
     def __init__(self,
-                 image: np.ndarray,
-                 labels,  # List[BaseLabel]
-                 size: int = 256,
-                 name: str = 'Untitled',
-                 bilateral_kwargs: dict = None,
-                 representation: str = 'fourier bilateral',
+                 dataset: dict,
+                 processor=None,
                  min_step = None,
-                 max_step = None):
-        super().__init__()
+                 max_step = None,
+                 representation: str = 'fourier bilateral',
+                 device = 'cuda'):
         
-        self.height = self.width = size  # use square img for now
-        self.labels = labels
-        self.name = name
-        self.representation = representation
+        super().__init__()
+        self.dataset = dataset
+        self.height = dataset['stft'].shape[1]  # 513
+        self.width = dataset['stft'].shape[2]   # 1024
+        self.text = dataset['text'][0]
+        self.processor = processor
+        assert self.height == 513 and self.width == 1024, 'stft shape must be [B, 513, 1024]'
+        
+        self.device = device
         self.min_step = min_step
         self.max_step = max_step
+        self.num_labels = 1
+        self.representation = representation
         
-        self.image = self._preprocess_image(image)
-        self.foreground = rp.as_torch_image(self.image).to(device)  # Convert image to tensor in CHW form        
+        self.foreground = dataset['stft'].to(device)       
         self.background = torch.zeros_like(self.foreground)  # background is solid color now
-        self.alphas = make_learnable_image(
-            self.height, self.width,
-            num_channels=len(self.labels),
-            foreground=self.foreground,
-            representation=representation,
-            bilateral_kwargs=bilateral_kwargs or {}
-        )            
-
-    @property
-    def num_labels(self):
-        return len(self.labels)
-
-    def _preprocess_image(self, image):
-        image = rp.cv_resize_image(image, (self.height, self.width))
-        image = rp.as_rgb_image(image)  # 3 channels in HWC form
-        assert image.shape==(self.height,self.width,3) and image.min()>=0 and image.max()<=1
-        return rp.as_float_image(image)  # value in [0, 1]
-
-    def set_background_color(self, color):
-        self.background[:] = torch.tensor(color, device=device).view(3, 1, 1)
-        
-    def randomize_background(self):
-        self.set_background_color(rp.random_rgb_float_color())
+        self.alphas = make_learnable_image(self.height, self.width, self.num_labels, representation)
         
     def forward(self, alphas=None, return_alphas=False):
-        try:
-            old_min_step, old_max_step = sd.min_step, sd.max_step
-            if (self.min_step is not None) and (self.max_step is not None):
-                sd.min_step, sd.max_step = self.min_step, self.max_step
+        old_min_step, old_max_step = ldm.min_step, ldm.max_step
+        if (self.min_step is not None) and (self.max_step is not None):
+            ldm.min_step, ldm.max_step = self.min_step, self.max_step
 
-            alphas = alphas if alphas is not None else self.alphas()
-            assert alphas.shape==(self.num_labels, self.height, self.width)
-            assert alphas.min()>=0 and alphas.max()<=1
-            output_images = torch.stack([blend_torch_images(self.foreground, self.background, alpha) for alpha in alphas])
-            assert output_images.shape==(self.num_labels, 3, self.height, self.width) #In BCHW form
-            return (output_images, alphas) if return_alphas else output_images
-        finally:
-            sd.min_step, sd.max_step = old_min_step, old_max_step
+        alphas = alphas if alphas is not None else self.alphas()  # alphas: [1, 513, 1024]
+        assert alphas.shape==(self.num_labels, self.height, self.width)
+        assert alphas.min()>=0 and alphas.max()<=1
+        
+        masked_stft = masking_torch_image(self.foreground, alphas)
+        self.data['stft'] = masked_stft.float()
 
-class SimpleLabel:
-    def __init__(self, name:str):
-        self.name=name  # :str
-        self.embedding=sd.get_text_embeddings(name).to(device)  # :torch.Tensor                
+        mel_basis = self.processor.mel_basis[f"{self.dataset.mel_fmax}_{self.device}"].to(self.device)
+        mel = spectral_normalize_torch(torch.matmul(mel_basis, masked_stft))
+        
+        masked_log_mel_spec = self.processor.pad_spec(mel[0].T).unsqueeze(0).float()
+        original_shape = self.dataset['log_mel_spec'].shape
+        assert self.dataset['log_mel_spec'].shape == masked_log_mel_spec.shape, f'{original_shape} != {masked_log_mel_spec.shape}'
+        self.dataset['log_mel_spec'] = masked_log_mel_spec
 
-def run_peekaboo(name: str,
-                 image,  # Union[str, np.ndarray]
-                 label=None,  # Optional[BaseLabel]
+        assert not torch.isnan(alphas).any() or not torch.isinf(alphas).any(), "alpha contains NaN or Inf values"  # NaN이나 Inf 값 체크
+
+        return (self.dataset, alphas) if return_alphas else self.dataset
+
+
+class Maskgenerator(nn.Module):
+   def __init__(self):
+       super().__init__()
+       self.prm = nn.Parameter(0.1 * torch.randn(1))
+       
+   def forward(self) -> torch.Tensor:
+       return torch.sigmoid(self.prm)
+
+class TestSeparator(nn.Module):
+    def __init__(self,
+                 dataset: dict,
+                 datase2: dict,
+                 processor=None,
+                 device = 'cuda'):
+        
+        super().__init__()
+        self.dataset = dataset
+        self.datase2 = datase2
+        self.text = dataset['text']
+        self.processor = processor
+        self.device = device
+        
+        self.foreground = dataset['log_mel_spec'].to(device)
+        self.background = datase2['log_mel_spec'].to(device)
+        self.alphas = Maskgenerator().to(device)
+        
+    def forward(self, alphas=None, return_alphas=False):
+        alphas = alphas if alphas is not None else self.alphas()  # alphas: [1, 513, 1024]
+        # assert alphas.min()>=0 and alphas.max()<=1
+        fmin, fmax = self.foreground.min(), self.foreground.max()
+        bmin, bmax = self.background.min(), self.background.max()
+        # assert fmin == bmin, f'foreground min != background min {fmin} != {bmin}'
+        # assert self.foreground.min()-fmin == self.background.min() - bmin == 0 == (self.foreground - fmin).min()==(self.background - bmin).min(),\
+        'foreground - min != background - min'
+        print(alphas)
+
+        masked_mel = ((self.foreground - fmin) * alphas) + ((self.background - fmin) * (1 - alphas)) + fmin
+        mmin, mmax = masked_mel.min(), masked_mel.max()
+        # assert mmin == fmin, f'masked min != foreground min {mmin} != {fmin}'
+        assert masked_mel.shape == self.foreground.shape, f'{masked_mel.shape} != {self.foreground.shape}'
+        # if fmax > bmax:
+        #     assert mmax <= fmax, f'masked max > foreground max {mmax} > {fmax}'
+        # else:
+        #     assert mmax <= bmax, f'masked max > background max {mmax} > {bmax}'        
+        assert not torch.isnan(alphas).any() or not torch.isinf(alphas).any(), "alpha contains NaN or Inf values"  # NaN이나 Inf 값 체크
+        self.dataset['log_mel_spec'] = masked_mel
+        return (self.dataset, alphas) if return_alphas else self.dataset
+
+
+def run_peekaboo(target_text: str,
+                 audio_file_path: str,
                  GRAVITY=1e-1/2,      # prompt에 따라 tuning이 제일 필요. (1e-2, 1e-1/2, 1e-1, 1.5*1e-1)
                  NUM_ITER=300,        # 이정도면 충분
                  LEARNING_RATE=1e-5,  # neural neural texture 아니면 키워도 됨.
                  BATCH_SIZE=1,        # 키우면 vram만 잡아먹음
                  GUIDANCE_SCALE=100,  # DreamFusion 참고하여 default값 설정
-                 bilateral_kwargs=None,
-                 square_image_method='crop',
                  representation='fourier bilateral',
                  min_step=None,
                  max_step=None):
-    
-    bilateral_kwargs = bilateral_kwargs or {
-        'kernel_size': 3,
-        'tolerance': .08,
-        'sigma': 5,
-        'iterations': 40
+
+    audioprocessor = AudioDataProcessor(device=device)
+    dataset = audioprocessor.preprocessing_data(audio_file_path)
+    dataset2 = audioprocessor.preprocessing_data("./best_samples/Footsteps_on_a_wooden_floor.wav")
+
+    '''
+    {
+    "text":         # list
+    "fname":        # list
+    "waveform":     # tensor, [B, 1, samples_num]
+    "stft":         # tensor, [B, t-steps, f-bins]
+    "log_mel_spec": # tensor, [B, t-steps, mel-bins]
     }
+    '''
+    assert len(dataset['text']) == 1, 'Only one audio file is allowed'
+    assert dataset['text'][0] == target_text, 'Text does not match'
+    if dataset['text'][0] != target_text:
+        dataset['text'][0] = target_text
+        print("Warning!: Text has been changed to match the target_text")
 
-    label = label or SimpleLabel(name)
-    image = rp.load_image(image) if isinstance(image, str) else image
-    image = rp.as_rgb_image(rp.as_float_image(make_image_square(image, square_image_method)))
+    # pkboo = AudioPeekabooSeparator(
+    #     dataset,
+    #     processor=audioprocessor,
+    #     representation=representation,
+    #     min_step=min_step,
+    #     max_step=max_step,
+    #     device=device
+    # ).to(device)
 
-    pkboo = PeekabooSegmenter(
-        image=image,
-        labels=[label],
-        name=name,
-        bilateral_kwargs=bilateral_kwargs,
-        representation=representation,
-        min_step=min_step,
-        max_step=max_step
+    pkboo = TestSeparator(
+        dataset,
+        dataset2,
+        processor=audioprocessor,
+        device=device
     ).to(device)
 
     optim = torch.optim.SGD(list(pkboo.parameters()), lr=LEARNING_RATE)
 
     def train_step():
         alphas = pkboo.alphas()
-        pkboo.randomize_background()
-        composites = pkboo()
+        composite_set = pkboo()
         
-        # for label, composite in zip(p.labels, composites):
-        label, composite = pkboo.labels[0], composites[0]
-        dummy_for_plot = sd.train_step(label.embedding, composite[None], guidance_scale=GUIDANCE_SCALE)
+        dummy_for_plot = ldm.train_step(composite_set, guidance_scale=GUIDANCE_SCALE)
         
         loss = alphas.mean() * GRAVITY
         alphaloss = loss.item()
-        loss2 = torch.abs(alphas[:, 1:, :] - alphas[:, :-1, :]).mean() + torch.abs(alphas[:, :, 1:] - alphas[:, :, :-1]).mean()
-        loss += loss2 * 5000
-        print(loss2.item())
+        # loss2 = torch.abs(alphas[:, 1:, :] - alphas[:, :-1, :]).mean() + torch.abs(alphas[:, :, 1:] - alphas[:, :, :-1]).mean()
+        # loss += loss2 * 5000
+        # print(loss2.item())
         loss.backward(); optim.step(); optim.zero_grad()
         sdsloss, uncond, cond, eps_diff = dummy_for_plot
         return sdsloss, alphaloss, uncond, cond, eps_diff
@@ -179,12 +214,11 @@ def run_peekaboo(name: str,
         print("Interrupted early, returning current results...")
         pass
     
-    pkboo.set_background_color((0,0,0))
     alphas = pkboo.alphas()
     results = {
-        "_image":image,
-        "alphas":rp.as_numpy_array(alphas),
-        "output":rp.as_numpy_images(pkboo(pkboo.alphas())),
+        "_image":rp.as_numpy_images(dataset["log_mel_spec"].unsqueeze(0).repeat(1,3,1,1)),
+        # "alphas":rp.as_numpy_array(alphas),
+        "output":rp.as_numpy_images(pkboo.dataset["log_mel_spec"].unsqueeze(0).detach().repeat(1,3,1,1).cpu().numpy()),  # rp.as_numpy_images(pkboo(pkboo.alphas())),
         
         "representation":representation,
         "NUM_ITER":NUM_ITER,
@@ -192,16 +226,14 @@ def run_peekaboo(name: str,
         "lr":LEARNING_RATE,
         "GUIDANCE_SCALE":GUIDANCE_SCALE,
         "BATCH_SIZE":BATCH_SIZE,
-        "bilateral_kwargs":bilateral_kwargs,
+
+        "alpha": alphas.mean().item(),
         
-        "p_name":pkboo.name,
-        "label":label,
-        "min_step":pkboo.min_step,
-        "max_step":pkboo.max_step,
+        "target_text":pkboo.text[0],
         "device":device,
     }
 
-    output_folder = rp.make_folder('peekaboo_results/%s'%name)
+    output_folder = rp.make_folder('peekaboo_results/%s'%target_text)
     output_folder += '/%03i'%len(rp.get_subfolders(output_folder))
     save_peekaboo_results(results, output_folder, list_dummy)
     print(f"Saved results at {output_folder}")
@@ -264,17 +296,17 @@ if __name__ == "__main__":
 
     # raster 용도.
     prms = {
-        'G': 3000,
+        'G': 0, # 3000,
         'iter': 300,
-        'lr': 1,
+        'lr': 0.00001,
         'B': 1,
         'guidance': 100,
         'representation': 'raster',
     }
 
     run_peekaboo(
-        name='Mario',
-        image="https://i1.sndcdn.com/artworks-000160550668-iwxjgo-t500x500.jpg",
+        target_text='A cat meowing',
+        audio_file_path="./best_samples/A_cat_meowing.wav",
         GRAVITY=prms['G'],
         NUM_ITER=prms['iter'],
         LEARNING_RATE=prms['lr'],

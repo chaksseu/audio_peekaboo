@@ -1,5 +1,5 @@
 from diffusers import AudioLDMPipeline
-
+import os
 # hf_pipe = AudioLDMPipeline.from_pretrained(pretrained_model_name_or_path="cvssp/audioldm-s-full")
 
 # print("UNet config:", hf_pipe.unet.config)
@@ -9,7 +9,7 @@ from diffusers import AudioLDMPipeline
 import torch
 
 repo_id = "cvssp/audioldm"  # audioldm-s-full
-torch.set_float32_matmul_precision("highest")
+torch.set_float32_matmul_precision("high")
 pipe = AudioLDMPipeline.from_pretrained(repo_id, torch_dtype=torch.float16)
 pipe = pipe.to("cuda")
 
@@ -41,7 +41,7 @@ audios = pipe(prompts, num_inference_steps=999, audio_length_in_s=10.24, guidanc
 
 import soundfile as sf
 import re
-
+os.makedirs("./samples", exist_ok=True)
 # audio의 길이가 5.0초이고, sample rate는 16000임
 for i, audio in enumerate(audios):
     caption = prompts[i]
