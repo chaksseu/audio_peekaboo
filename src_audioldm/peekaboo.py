@@ -69,7 +69,6 @@ class AudioPeekabooSeparator(nn.Module):
         self.alphas = make_learnable_image(self.height, self.width, self.num_labels, representation)
         
     def forward(self, alphas=None, return_alphas=False):
-
         alphas = alphas if alphas is not None else self.alphas()  # alphas: [1, 513, 1024]
         masked_stft = masking_torch_image(self.foreground, alphas).float()
         mel_basis = self.processor.mel_basis[f"{self.processor.mel_fmax}_{self.device}"].to(self.device)
@@ -239,7 +238,7 @@ def run_peekaboo(target_text: str,
     save_melspec_as_img(mel_cpu, os.path.join(output_folder, "GT_mel.png"))
 
     alpha = make_learnable_image(513, 1024, 1, representation).to(device)
-    mel_cpu = pkboo(alpha)['log_mel_spec'][0, ...].detach().cpu()
+    mel_cpu = pkboo(alpha())['log_mel_spec'][0, ...].detach().cpu()
     save_melspec_as_img(mel_cpu, os.path.join(output_folder, "mixed_mel.png"))
 
     mel_cpu = pkboo()['log_mel_spec'][0, ...].detach().cpu()
@@ -335,9 +334,9 @@ if __name__ == "__main__":
 
     # raster 용도.
     prms = {
-        'G': 3000, # 3000,
-        'iter': 100,
-        'lr': 0.0001,
+        'G': 5000, # 3000,
+        'iter': 250,
+        'lr': 0.00001,
         'B': 1,
         'guidance': 100,
         'representation': 'cnn',

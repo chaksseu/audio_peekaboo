@@ -25,8 +25,8 @@ class AudioLDM(nn.Module):
         super().__init__()
         self.device = torch.device(device)
         self.num_train_timesteps = 1000
-        self.min_step = int(self.num_train_timesteps * 0.02)
-        self.max_step = int(self.num_train_timesteps * 0.98)
+        self.min_step = int(self.num_train_timesteps * 0.20)
+        self.max_step = int(self.num_train_timesteps * 0.90)
         self.scale_factor = 1.0
                 
         # Initialize pipeline with PNDM scheduler (load from pipeline. let us use dreambooth models.)
