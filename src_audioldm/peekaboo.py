@@ -17,6 +17,7 @@ from src_audioldm.learnable_textures import (
     LearnableImageFourier,
     LearnableImageRasterSigmoided,
 )
+from src_audioldm.learnable_textures2 import AudioMaskGeneratorCNN, AudioMaskGeneratorTransformer
 
 ldm = ldm.AudioLDM('cuda:0')
 device = ldm.device
@@ -24,7 +25,9 @@ device = ldm.device
 def make_learnable_image(height, width, num_channels, representation='fourier'):
     image_types = {
         'fourier': LearnableImageFourier(height, width, num_channels),
-        'raster': LearnableImageRasterSigmoided(height, width, num_channels)}
+        'raster': LearnableImageRasterSigmoided(height, width, num_channels),
+        'cnn': AudioMaskGeneratorCNN(height, width, num_channels),
+        'transformer': AudioMaskGeneratorTransformer(height, width, num_channels),}
     return image_types.get(representation, ValueError(f'Invalid method: {representation}'))
 
 def blend_torch_images(foreground, background, alpha):
@@ -337,7 +340,7 @@ if __name__ == "__main__":
         'lr': 0.0001,
         'B': 1,
         'guidance': 100,
-        'representation': 'fourier',
+        'representation': 'cnn',
     }
 
     # run_peekaboo(
