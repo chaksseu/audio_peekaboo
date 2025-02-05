@@ -31,7 +31,7 @@ class GaussianFourierFeatureTransform(nn.Module):
 def get_uv_grid(height: int, width: int, batch_size: int = 1) -> torch.Tensor:
    """Creates UV coordinate grid of shape [B, 2, H, W] ranging [0, 1)"""
    
-   coords = [np.linspace(0, 1, size, endpoint=False) for size in [height, width]]
+   coords = [np.linspace(0, 1, size, endpoint=False) for size in [width, height]]
    
    uv_grid = np.stack(np.meshgrid(*coords), -1)
    uv_grid = (torch.tensor(uv_grid)

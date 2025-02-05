@@ -18,7 +18,7 @@ from src_audioldm.learnable_textures import (
     LearnableImageRasterSigmoided,
 )
 
-ldm = ldm.AudioLDM('cuda')
+ldm = ldm.AudioLDM('cuda:0')
 device = ldm.device
 
 def make_learnable_image(height, width, num_channels, representation='fourier'):
@@ -66,18 +66,17 @@ class AudioPeekabooSeparator(nn.Module):
         self.alphas = make_learnable_image(self.height, self.width, self.num_labels, representation)
         
     def forward(self, alphas=None, return_alphas=False):
-        old_min_step, old_max_step = ldm.min_step, ldm.max_step
-        if (self.min_step is not None) and (self.max_step is not None):
-            ldm.min_step, ldm.max_step = self.min_step, self.max_step
 
         alphas = alphas if alphas is not None else self.alphas()  # alphas: [1, 513, 1024]
-        assert alphas.shape==(self.num_labels, self.height, self.width)
-        assert alphas.min()>=0 and alphas.max()<=1
-        
-        masked_stft = masking_torch_image(self.foreground, alphas)
-        self.data['stft'] = masked_stft.float()
+        shape = (self.dataset['stft'].shape)
+        assert alphas.shape == self.dataset['stft'].shape, f'alpha shape error {alphas.shape}, {shape}'
+        assert alphas.min()>=0 and alphas.max()<=1, f'alpha range error {alphas.min()}, {alphas.max()}'
 
-        mel_basis = self.processor.mel_basis[f"{self.dataset.mel_fmax}_{self.device}"].to(self.device)
+        print(alphas.mean().item(), alphas.min().item(), alphas.max().item())
+        
+        masked_stft = masking_torch_image(self.foreground, alphas).float()
+
+        mel_basis = self.processor.mel_basis[f"{self.processor.mel_fmax}_{self.device}"].to(self.device)
         mel = spectral_normalize_torch(torch.matmul(mel_basis, masked_stft))
         
         masked_log_mel_spec = self.processor.pad_spec(mel[0].T).unsqueeze(0).float()
@@ -154,6 +153,8 @@ def run_peekaboo(target_text: str,
     dataset = audioprocessor.preprocessing_data(audio_file_path)
     dataset2 = audioprocessor.preprocessing_data("./best_samples/Footsteps_on_a_wooden_floor.wav")
 
+    datasep1, datasep2 = audioprocessor.get_mixed_batches(dataset, dataset2)
+
     '''
     {
     "text":         # list
@@ -169,21 +170,23 @@ def run_peekaboo(target_text: str,
         dataset['text'][0] = target_text
         print("Warning!: Text has been changed to match the target_text")
 
-    # pkboo = AudioPeekabooSeparator(
+    pkboo = AudioPeekabooSeparator(
+        datasep1,
+        processor=audioprocessor,
+        representation=representation,
+        min_step=min_step,
+        max_step=max_step,
+        device=device
+    ).to(device)
+
+    # pkboo = TestSeparator(
     #     dataset,
+    #     dataset2,
     #     processor=audioprocessor,
-    #     representation=representation,
-    #     min_step=min_step,
-    #     max_step=max_step,
     #     device=device
     # ).to(device)
 
-    pkboo = TestSeparator(
-        dataset,
-        dataset2,
-        processor=audioprocessor,
-        device=device
-    ).to(device)
+    # raise ValueError('Please check the dataset and datasep1, datasep2')
 
     optim = torch.optim.SGD(list(pkboo.parameters()), lr=LEARNING_RATE)
 
@@ -195,7 +198,6 @@ def run_peekaboo(target_text: str,
         
         loss = alphas.mean() * GRAVITY
         alphaloss = loss.item()
-        alphaloss = alphas.mean().item()
         # loss2 = torch.abs(alphas[:, 1:, :] - alphas[:, :-1, :]).mean() + torch.abs(alphas[:, :, 1:] - alphas[:, :, :-1]).mean()
         # loss += loss2 * 5000
         # print(loss2.item())
@@ -226,21 +228,20 @@ def run_peekaboo(target_text: str,
         "lr":LEARNING_RATE,
         "GUIDANCE_SCALE":GUIDANCE_SCALE,
         "BATCH_SIZE":BATCH_SIZE,
-
-        "alpha": alphas.mean().item(),
         
         "target_text":pkboo.text[0],
         "device":device,
     }
-
+    
     output_folder = rp.make_folder('peekaboo_results/%s'%target_text)
     output_folder += '/%03i'%len(rp.get_subfolders(output_folder))
     save_peekaboo_results(results, output_folder, list_dummy)
 
     mel_cpu = dataset['log_mel_spec'][0, ...].detach().cpu()
-    save_melspec_as_img(mel_cpu, os.path.join(output_folder, "orign_mel.png"))
+    save_melspec_as_img(mel_cpu, os.path.join(output_folder, "GT_mel.png"))
 
-    mel_cpu = pkboo(alphas=torch.Tensor([0.5]).to(device))['log_mel_spec'][0, ...].detach().cpu()
+    alpha = make_learnable_image(513, 1024, 1, representation).to(device)
+    mel_cpu = pkboo(alpha)['log_mel_spec'][0, ...].detach().cpu()
     save_melspec_as_img(mel_cpu, os.path.join(output_folder, "mixed_mel.png"))
 
     mel_cpu = pkboo()['log_mel_spec'][0, ...].detach().cpu()
@@ -249,11 +250,7 @@ def run_peekaboo(target_text: str,
     import soundfile as sf
     mel = dataset['log_mel_spec'][0, ...].half()
     audio = ldm.post_process_from_mel(mel)
-    sf.write(os.path.join(output_folder, "orign_audio.wav"), audio, 16000)
-
-    mel = pkboo(alphas=torch.Tensor([0.5]).to(device))['log_mel_spec'][0, ...].half()
-    audio = ldm.post_process_from_mel(mel)
-    sf.write(os.path.join(output_folder, "mixed_audio.wav"), audio, 16000)
+    sf.write(os.path.join(output_folder, "GT_audio.wav"), audio, 16000)
 
     mel = pkboo()['log_mel_spec'][0, ...].half()
     audio = ldm.post_process_from_mel(mel)
@@ -340,12 +337,12 @@ if __name__ == "__main__":
 
     # raster 용도.
     prms = {
-        'G': 0, # 3000,
+        'G': 3000, # 3000,
         'iter': 100,
         'lr': 0.0001,
         'B': 1,
         'guidance': 100,
-        'representation': 'raster',
+        'representation': 'fourier',
     }
 
     # run_peekaboo(
