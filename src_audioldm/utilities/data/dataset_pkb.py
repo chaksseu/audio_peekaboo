@@ -283,5 +283,39 @@ class AudioDataProcessor():
 
         return (mixed_set1, mixed_set2)
 
+    ######### 추가된 부분
+    def wav_to_fbank(self, filename, target_length=1024, fn_STFT=None):
+        assert fn_STFT is not None
 
+        # mixup
+        waveform, _ = self.read_wav_file(filename)  # hop size is 160
+        waveform = waveform / np.max(np.abs(waveform))
+        waveform = 0.5 * waveform
 
+        waveform = waveform[0, ...]
+        waveform = torch.FloatTensor(waveform)
+
+        fbank, log_magnitudes_stft, energy = self.get_mel_from_wav(waveform, fn_STFT)
+
+        fbank = torch.FloatTensor(fbank.T)
+        log_magnitudes_stft = torch.FloatTensor(log_magnitudes_stft.T)
+
+        fbank, log_magnitudes_stft = self.pad_spec(fbank), self.pad_spec(log_magnitudes_stft)
+
+        return fbank, log_magnitudes_stft, waveform
+
+    def get_mel_from_wav(self, wav, fn_stft):
+        wav = torch.clip(torch.FloatTensor(wav).unsqueeze(0), -1, 1)
+        wav = torch.autograd.Variable(wav, requires_grad=False)
+        package = fn_stft.mel_spectrogram(wav)
+        print(package)
+        melspec, log_magnitudes_stft, energy, _ = package
+        for i in package:
+            print(i.shape)
+        melspec = torch.squeeze(melspec, 0).numpy().astype(np.float32)
+        log_magnitudes_stft = (torch.squeeze(log_magnitudes_stft, 0).numpy().astype(np.float32))
+        energy = torch.squeeze(energy, 0).numpy().astype(np.float32)
+        return melspec, log_magnitudes_stft, energy
+    ####### 여기까지
+
+    
