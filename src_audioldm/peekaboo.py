@@ -68,26 +68,21 @@ class AudioPeekabooSeparator(nn.Module):
     def forward(self, alphas=None, return_alphas=False):
 
         alphas = alphas if alphas is not None else self.alphas()  # alphas: [1, 513, 1024]
+        masked_stft = masking_torch_image(self.foreground, alphas).float()
+        mel_basis = self.processor.mel_basis[f"{self.processor.mel_fmax}_{self.device}"].to(self.device)
+        mel = spectral_normalize_torch(torch.matmul(mel_basis, masked_stft))        
+        masked_log_mel_spec = self.processor.pad_spec(mel[0].T).unsqueeze(0).float()
+        original_shape = self.dataset['log_mel_spec'].shape        
+        self.dataset['log_mel_spec'] = masked_log_mel_spec
+        
         shape = (self.dataset['stft'].shape)
         assert alphas.shape == self.dataset['stft'].shape, f'alpha shape error {alphas.shape}, {shape}'
         assert alphas.min()>=0 and alphas.max()<=1, f'alpha range error {alphas.min()}, {alphas.max()}'
-
         print(alphas.mean().item(), alphas.min().item(), alphas.max().item())
-        
-        masked_stft = masking_torch_image(self.foreground, alphas).float()
-
-        mel_basis = self.processor.mel_basis[f"{self.processor.mel_fmax}_{self.device}"].to(self.device)
-        mel = spectral_normalize_torch(torch.matmul(mel_basis, masked_stft))
-        
-        masked_log_mel_spec = self.processor.pad_spec(mel[0].T).unsqueeze(0).float()
-        original_shape = self.dataset['log_mel_spec'].shape
-        assert self.dataset['log_mel_spec'].shape == masked_log_mel_spec.shape, f'{original_shape} != {masked_log_mel_spec.shape}'
-        self.dataset['log_mel_spec'] = masked_log_mel_spec
-
+        assert original_shape == masked_log_mel_spec.shape, f'{original_shape} != {masked_log_mel_spec.shape}'
         assert not torch.isnan(alphas).any() or not torch.isinf(alphas).any(), "alpha contains NaN or Inf values"  # NaN이나 Inf 값 체크
-
+        
         return (self.dataset, alphas) if return_alphas else self.dataset
-
 
 class Maskgenerator(nn.Module):
    def __init__(self):
