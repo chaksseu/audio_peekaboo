@@ -221,6 +221,7 @@ class AudioLDM(nn.Module):
         if mel_spectrogram.dim() == 4:
             mel_spectrogram = mel_spectrogram.squeeze(1)
 
+        mel_spectrogram = mel_spectrogram.half()
         waveform = self.vocoder(mel_spectrogram)
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
         waveform = waveform.cpu().float()
@@ -236,7 +237,7 @@ class AudioLDM(nn.Module):
         duration=10,
         batchsize=1,
         guidance_scale=2.5,
-        ddim_steps=199,
+        ddim_steps=499,
         processor=None,
     ):
         device = self.device
@@ -275,10 +276,11 @@ class AudioLDM(nn.Module):
             uncond, cond = self._encode_prompt(prompts=prompts).chunk(2)
             print(uncond.shape, cond.shape)
             z_enc = sampler.stochastic_encode(init_latent_x, torch.tensor([t_enc] * batchsize).to(device))  ##
-            samples = sampler.decode(z_enc, cond, t_enc, unconditional_guidance_scale=guidance_scale, unconditional_conditioning=uncond,)  ##
+            samples = sampler.decode(z_enc, cond, t_enc, unconditional_guidance_scale=guidance_scale, unconditional_conditioning=uncond, latent_x=init_latent_x)  ##
             x_samples = self.decode_latents(samples)  # decode_first_stage
-            x_samples = self.decode_latents(samples[:,:,:-3,:])
-            print(x_samples.shape)
+            x_samples = self.decode_latents(samples[:,:,:-3,:]) 
+            # assert x_samples.shape == mel[:,:,:-12,:].shape, f"{x_samples.shape},{mel.shape}"
+            # x_samples = torch.minimum(x_samples, mel[:,:,:-12,:])
             waveform = self.mel_spectrogram_to_waveform(x_samples)
         
             # if audio.dim() == 2:
@@ -590,13 +592,14 @@ class DDIMSampler(object):
         unconditional_guidance_scale=1.0,
         unconditional_conditioning=None,
         use_original_steps=False,
+        latent_x=None
     ):
 
         timesteps = np.arange(self.ddpm_num_timesteps) if use_original_steps else self.ddim_timesteps
         timesteps = timesteps[:t_start]
         time_range = np.flip(timesteps)
         total_steps = timesteps.shape[0]
-
+        print(timesteps)
         iterator = tqdm(time_range, desc="Decoding image", total=total_steps)
         x_dec = x_latent
 
@@ -618,6 +621,7 @@ class DDIMSampler(object):
                 use_original_steps=use_original_steps,
                 unconditional_guidance_scale=unconditional_guidance_scale,
                 unconditional_conditioning=unconditional_conditioning,
+                latent_x=latent_x,
             )
         return x_dec
 
@@ -637,11 +641,14 @@ class DDIMSampler(object):
         corrector_kwargs=None,
         unconditional_guidance_scale=1.0,
         unconditional_conditioning=None,
+        latent_x=None,
     ):
         b, *_, device = *x.shape, x.device
 
         if unconditional_conditioning is None or unconditional_guidance_scale == 1.0:
-            e_t = self.model.unet(x, t, c)
+            x = x.half(); t = t.half(); c = c.half()
+
+            e_t = self.model.unet(x, t, encoder_hidden_states=None, class_labels=c, cross_attention_kwargs=None).sample
         else:
             x_in = torch.cat([x] * 2)
             t_in = torch.cat([t] * 2)
@@ -695,6 +702,7 @@ class DDIMSampler(object):
         if noise_dropout > 0.0:
             noise = torch.nn.functional.dropout(noise, p=noise_dropout)
         x_prev = a_prev.sqrt() * pred_x0 + dir_xt + noise  # TODO
+        # x_prev = torch.maximum(torch.minimum(x_prev, latent_x), latent_x)
         return x_prev, pred_x0
 
 
