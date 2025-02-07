@@ -4,7 +4,7 @@ import torch
 import torchaudio
 from librosa.filters import mel as librosa_mel_fn
 
-import src_audioldm.utilities.audio as Audio
+# import src_audioldm.utilities.audio as Audio
 
 def dynamic_range_compression_torch(x, C=1, clip_val=1e-5):
     return torch.log(torch.clamp(x, min=clip_val) * C)
@@ -44,14 +44,14 @@ class AudioDataProcessor():
         self.pad_size = int((self.filter_length - self.hop_length) / 2)
         self.n_times = ((self.sample_length + 2 * self.pad_size) - self.win_length // self.hop_length +1)
 
-        self.STFT = Audio.stft.TacotronSTFT(
-                    self.filter_length,
-                    self.hop_length,
-                    self.win_length,
-                    self.n_mel,
-                    self.sampling_rate,
-                    self.mel_fmin,
-                    self.mel_fmax,)
+        # self.STFT = Audio.stft.TacotronSTFT(
+        #             self.filter_length,
+        #             self.hop_length,
+        #             self.win_length,
+        #             self.n_mel,
+        #             self.sampling_rate,
+        #             self.mel_fmin,
+        #             self.mel_fmax,)
 
     # --------------------------------------------------------------------------------------------- #
 
@@ -303,4 +303,3 @@ class AudioDataProcessor():
         assert mixed_set1["log_mel_spec"].shape == torch.Size([1, 1024, 64]), mixed_set1["log_mel_spec"].shape
 
         return (mixed_set1, mixed_set2)
-    

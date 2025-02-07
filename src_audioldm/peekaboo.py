@@ -246,11 +246,11 @@ def run_peekaboo(target_text: str,
 
     import soundfile as sf
     mel = dataset['log_mel_spec'][0, ...].half()
-    audio = ldm.post_process_from_mel(mel)
+    audio = ldm.mel_to_wav(mel)
     sf.write(os.path.join(output_folder, "GT_audio.wav"), audio, 16000)
 
     mel = pkboo()['log_mel_spec'][0, ...].half()
-    audio = ldm.post_process_from_mel(mel)
+    audio = ldm.mel_to_wav(mel)
     sf.write(os.path.join(output_folder, "seped_audio.wav"), audio, 16000)
     
     print(f">> Saved results at {output_folder}!!!")

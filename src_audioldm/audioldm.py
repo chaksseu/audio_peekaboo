@@ -1,12 +1,13 @@
-from typing import Union, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from diffusers import (
-   AutoencoderKL,
-   PNDMScheduler,
    AudioLDMPipeline,
+   AutoencoderKL,
    UNet2DConditionModel,
+   DDIMScheduler,
+   PNDMScheduler,
 )
 from transformers import (
    ClapTextModelWithProjection,
@@ -30,9 +31,7 @@ class AudioLDM(nn.Module):
         self.scale_factor = 1.0
                 
         # Initialize pipeline with PNDM scheduler (load from pipeline. let us use dreambooth models.)
-        pipe = AudioLDMPipeline.from_pretrained(repo_id, torch_dtype=torch.float16)
-
-        print(pipe.scheduler)
+        pipe = AudioLDMPipeline.from_pretrained(repo_id)  # torch_dtype=torch.float16
         
         #### 둘중 택일
         ## pipe.scheduler=PNDMScheduler(beta_start=0.00085,beta_end=0.012,beta_schedule="scaled_linear",num_train_timesteps=self.num_train_timesteps)
@@ -48,6 +47,7 @@ class AudioLDM(nn.Module):
             'text_encoder': (pipe.text_encoder, ClapTextModelWithProjection),
             'unet': (pipe.unet, UNet2DConditionModel),
             'vocoder': (pipe.vocoder, SpeechT5HifiGan),
+            'scheduler': (pipe.scheduler, DDIMScheduler)
             # 'scheduler': (pipe.scheduler, PNDMScheduler)
         }
         
@@ -66,8 +66,63 @@ class AudioLDM(nn.Module):
 
         self.audio_length_in_s = 10.24
         self.original_waveform_length = int(self.audio_length_in_s * self.vocoder.config.sampling_rate)
+        self.vae_scale_factor = 2 ** (len(self.vae.config.block_out_channels) - 1)
         print(f'[INFO] audioldm.py: loaded AudioLDM!')
+    
+    def get_input(self, batch, key):
+        '''
+        fname = batch["fname"]
+        text = batch["text"]
+        label_indices = batch["label_vector"]
+        waveform = batch["waveform"]
+        stft = batch["stft"]
+        mel = batch["log_mel_spec"]
+        '''
+        return_format = {
+            "fname": batch["fname"],
+            "text": batch["text"],
+            "waveform": batch["waveform"].to(memory_format=torch.contiguous_format).float(),
+            "stft": batch["stft"].to(memory_format=torch.contiguous_format).float(),
+            "mel": batch["log_mel_spec"].unsqueeze(1).to(memory_format=torch.contiguous_format).float(),
+        }
+        for key_ in batch.keys():
+            if key_ not in return_format.keys():
+                return_format[key_] = batch[key_]
+        return return_format[key]
+    
+    def train_step(self, batch: dict, guidance_scale: float = 100, t: Optional[int] = None):
+        # Prepare image and timestep
 
+        x = self.get_input(batch, 'mel').to(self.device)  # mean: -4.63, std: 2.74
+        text = self.get_input(batch, 'text')
+        prompt_embeds = self._encode_prompt(text, do_classifier_free_guidance=True)
+
+        t = t if t is not None else torch.randint(self.min_step, self.max_step + 1, (x.shape[0],), device=self.device).long()
+        assert 0 <= t < self.num_train_timesteps, f'invalid timestep t={t}'
+        x = x.half()  # Convert to half precision
+        # Encode image to latents (with grad)
+        latent = self.encode_audios(x)
+
+        # Predict noise without grad
+        with torch.no_grad():
+            noise = torch.randn_like(latent)
+            latents_noisy = self.scheduler.add_noise(latent, noise, t.cpu())
+            noise_pred = self.unet(torch.cat([latents_noisy] * 2), t, encoder_hidden_states=None, class_labels=prompt_embeds, cross_attention_kwargs=None).sample
+
+        # Guidance . High value from paper
+        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+        # Calculate and apply gradients
+        w = (1 - self.alphas_cumprod[t])
+        grad = w * (noise_pred - noise)
+        latent.backward(gradient=grad, retain_graph=True)
+
+        noise_mse = ((noise_pred - noise) ** 2).mean().item()
+        uncond, cond = noise_pred_uncond.abs().mean().item(), noise_pred_text.abs().mean().item()
+        c_minus_unc = (noise_pred_uncond - noise_pred_text).abs().mean().item()
+        return (noise_mse, uncond, cond, c_minus_unc)
+    
     def _encode_prompt(self, prompts: Union[str, List[str]], do_classifier_free_guidance=True) -> torch.Tensor:
         # 1. Batch size 결정
         if prompts is not None and isinstance(prompts, str):
@@ -114,233 +169,238 @@ class AudioLDM(nn.Module):
 
             assert (uncond_prompt_embeds == uncond_prompt_embeds[0][None]).all()  # All the same
             prompt_embeds = torch.cat([uncond_prompt_embeds, prompt_embeds])  # First B rows: uncond, Last B rows: cond
-        return prompt_embeds
+        return prompt_embeds\
 
-    def train_step(self, batch: dict, guidance_scale: float = 100, t: Optional[int] = None):
-        # Prepare image and timestep
-
-        x = self.get_input(batch, 'mel').to(self.device)  # mean: -4.63, std: 2.74
-        text = self.get_input(batch, 'text')
-        prompt_embeds = self._encode_prompt(text, do_classifier_free_guidance=True)
-
-        t = t if t is not None else torch.randint(self.min_step, self.max_step + 1, (x.shape[0],), device=self.device).long()
-        assert 0 <= t < self.num_train_timesteps, f'invalid timestep t={t}'
-        x = x.half()  # Convert to half precision
-        # Encode image to latents (with grad)
-        latent = self.encode_audios(x)
-
-        # Predict noise without grad
-        with torch.no_grad():
-            noise = torch.randn_like(latent)
-            latents_noisy = self.scheduler.add_noise(latent, noise, t.cpu())
-            noise_pred = self.unet(torch.cat([latents_noisy] * 2), t, encoder_hidden_states=None, class_labels=prompt_embeds, cross_attention_kwargs=None).sample
-
-        # Guidance . High value from paper
-        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-        # Calculate and apply gradients
-        w = (1 - self.alphas_cumprod[t])
-        grad = w * (noise_pred - noise)
-        latent.backward(gradient=grad, retain_graph=True)
-
-        noise_mse = ((noise_pred - noise) ** 2).mean().item()
-        uncond, cond = noise_pred_uncond.abs().mean().item(), noise_pred_text.abs().mean().item()
-        c_minus_unc = (noise_pred_uncond - noise_pred_text).abs().mean().item()
-        return (noise_mse, uncond, cond, c_minus_unc)
-
-    def get_input(self, batch, key):
-        '''
-        fname = batch["fname"]
-        text = batch["text"]
-        label_indices = batch["label_vector"]
-        waveform = batch["waveform"]
-        stft = batch["stft"]
-        mel = batch["log_mel_spec"]
-        '''
-        return_format = {
-            "fname": batch["fname"],
-            "text": batch["text"],
-            "waveform": batch["waveform"].to(memory_format=torch.contiguous_format).float(),
-            "stft": batch["stft"].to(memory_format=torch.contiguous_format).float(),
-            "mel": batch["log_mel_spec"].unsqueeze(1).to(memory_format=torch.contiguous_format).float(),
-        }
-        for key_ in batch.keys():
-            if key_ not in return_format.keys():
-                return_format[key_] = batch[key_]
-        return return_format[key]
-    
     def encode_audios(self, x):
         x = x.half()  ##
         encoder_posterior = self.vae.encode(x)
-
-        if hasattr(encoder_posterior.latent_dist, "sample"):  # sample() 메서드가 있는 경우 (DiagonalGaussianDistribution 타입)
-            unscaled_z = encoder_posterior.latent_dist.sample()
-        elif isinstance(encoder_posterior.latent_dist, torch.Tensor):  # 그냥 Tensor라면 그대로 사용
-            unscaled_z = encoder_posterior.latent_dist
-        else:
-            raise NotImplementedError(f"Unsupported encoder_posterior type: {type(encoder_posterior)}")
-
+        unscaled_z = encoder_posterior.latent_dist.sample()
         # self.scale_factor = 1.0 / z.flatten().std()  # Normalize z to have std=1  #### 둘 다 값 확인해보고 뭐 쓸지 결정
-        self.scale_factor = self.vae.config.scaling_factor  # Normalize z to have std=1  ####
-        # print(self.scale_factor)  #### 몇인지 확인하자 : 0.9227914214134216
+        self.scale_factor = self.vae.config.scaling_factor  # Normalize z to have std=1  #### : 0.9227914214134216
         z = self.scale_factor * unscaled_z
         return z
-
-    def post_process_from_latent(self, latents, output_type: Optional[str] = "np", return_dict: bool = True):
-        mel_spectrogram = self.decode_latents(latents)
-        audio = self.mel_spectrogram_to_waveform(mel_spectrogram)
-        audio = audio[:, :self.original_waveform_length]
-        
-        if output_type == "np":
-            audio = audio.detach().numpy()
-        
-        if not return_dict:
-            return (audio,)
-        return audio
-    
-    def post_process_from_mel(self, mel_spectrogram, output_type: Optional[str] = "np", return_dict: bool = True):
-        audio = self.mel_spectrogram_to_waveform(mel_spectrogram)
-        if audio.dim() == 2:
-            audio = audio[:, :self.original_waveform_length]
-        else:
-            audio = audio[:self.original_waveform_length]
-        
-        if output_type == "np":
-            audio = audio.detach().numpy()
-        
-        if not return_dict:
-            return (audio,)
-        return audio
 
     def decode_latents(self, latents):
         latents = 1 / self.vae.config.scaling_factor * latents
         latents = latents.half()  ##
         mel_spectrogram = self.vae.decode(latents).sample
         return mel_spectrogram
-    
-    def mel_spectrogram_to_waveform(self, mel_spectrogram):  # don't use for final postprocessing
+
+    def mel_to_waveform(self, mel_spectrogram):  # don't use for final postprocessing
         if mel_spectrogram.dim() == 4:
             mel_spectrogram = mel_spectrogram.squeeze(1)
 
-        mel_spectrogram = mel_spectrogram.half()
+        mel_spectrogram = mel_spectrogram.half()  ##
         waveform = self.vocoder(mel_spectrogram)
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
-        waveform = waveform.cpu().float()
+        if waveform.dim() == 2:
+            waveform = waveform[:, :self.original_waveform_length]
+        elif waveform.dim() == 1:
+            waveform = waveform[:self.original_waveform_length]
+        else:
+            raise ValueError
+        waveform = waveform.detach().squeeze(0).cpu().float().numpy()
+        print(waveform.shape)
         return waveform
 
-    ########### 여기부터 추가됨 Editing
-    def style_transfer(
+    @torch.no_grad()
+    def ddim_noising(
         self,
-        text,  #
-        original_audio_file_path,  #
-        transfer_strength,  #
-        seed=42,
-        duration=10,
-        batchsize=1,
-        guidance_scale=2.5,
-        ddim_steps=499,
-        processor=None,
-    ):
-        device = self.device
-        assert original_audio_file_path is not None, "You need to provide the original audio file path"
-        audio_file_duration = get_duration(original_audio_file_path)
-        assert get_bit_depth(original_audio_file_path) == 16, "The bit depth of the original audio file %s must be 16" % original_audio_file_path
-        if(duration > audio_file_duration):
-            print("Warning: Duration you specified %s-seconds must equal or smaller than the audio file duration %ss" % (duration, audio_file_duration))
-            duration = round_up_duration(audio_file_duration)
-            print("Set new duration as %s-seconds" % duration)
+        latents: torch.Tensor,
+        num_inference_steps: int = 50,
+        generator: Optional[torch.Generator] = None,
+    ) -> torch.Tensor:
+        r"""
+        DDIM Inversion을 위해, 이미 얻은 latents에 time step을 거치며 노이즈를 추가(Forward pass)하는 메서드.
+        주어진 latents는 보통 VAE의 encode 과정을 통해 얻은 것이라 가정한다.
 
-        seed_everything(int(seed))
+        Args:
+            latents (`torch.Tensor`):
+                VAE encoder로부터 얻은 초기 latents.
+            num_inference_steps (`int`, *optional*, defaults to 50):
+                DDIMScheduler로 진행할 noising step 수.
+            generator (`torch.Generator`, *optional*):
+                재현성을 위한 torch.Generator.
 
-        fn_STFT = processor.STFT
+        Returns:
+            (`torch.Tensor`):
+                지정된 step 수만큼 노이즈가 주입된 latents.
+        """
+        device = latents.device
+        # DDIM 전용 Scheduler라고 가정
+        self.scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = self.scheduler.timesteps
 
-        mel, _, _ = processor.read_audio_file(original_audio_file_path, target_length=int(duration * 102.4), fn_STFT=fn_STFT)
-        mel = mel.unsqueeze(0).unsqueeze(0).to(device)  # 1,1,t,mel
-        from einops import repeat
-        mel = repeat(mel, "1 ... -> b ...", b=batchsize)
-        init_latent_x = self.encode_audios(mel)  # move to latent space, encode and sample
-        if(torch.max(torch.abs(init_latent_x)) > 1e2):
-            init_latent_x = torch.clip(init_latent_x, min=-10, max=10)
-        sampler = DDIMSampler(self)  ### latent_diffusion
-        sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_eta=1.0, verbose=False)  ##
+        noisy_latents = latents.clone()
 
-        t_enc = int(transfer_strength * ddim_steps)
-        prompts = text
+        # forward로 t=0 -> t=1 ... -> t=T 방향으로 노이즈 주입
+        for i, t in enumerate(timesteps):
+            noise = torch.randn_like(noisy_latents, generator=generator)
+            # add_noise는 DDIMScheduler나 비슷한 스케줄러에 구현됨
+            noisy_latents = self.scheduler.add_noise(noisy_latents, noise, t)
 
-        with torch.no_grad():
-            # with self.ema_scope():
+        return noisy_latents
 
-            # uc = None
-            # if guidance_scale != 1.0:
-            #     uc = latent_diffusion.cond_stage_model.get_unconditional_condition(batchsize)
-            # c = latent_diffusion.get_learned_conditioning([prompts] * batchsize)
-            uncond, cond = self._encode_prompt(prompts=prompts).chunk(2)
-            print(uncond.shape, cond.shape)
-            z_enc = sampler.stochastic_encode(init_latent_x, torch.tensor([t_enc] * batchsize).to(device))  ##
-            samples = sampler.decode(z_enc, cond, t_enc, unconditional_guidance_scale=guidance_scale, unconditional_conditioning=uncond, latent_x=init_latent_x)  ##
-            x_samples = self.decode_latents(samples)  # decode_first_stage
-            x_samples = self.decode_latents(samples[:,:,:-3,:]) 
-            # assert x_samples.shape == mel[:,:,:-12,:].shape, f"{x_samples.shape},{mel.shape}"
-            # x_samples = torch.minimum(x_samples, mel[:,:,:-12,:])
-            waveform = self.mel_spectrogram_to_waveform(x_samples)
-        
-            # if audio.dim() == 2:
-            #     audio = audio[:, :self.original_waveform_length]
-            # else:
-            #     audio = audio[:self.original_waveform_length]
-            
-            # if output_type == "np":
-            #     audio = audio.detach().numpy()
-            
-            # if not return_dict:
-            #     return (audio,)
-            # return audio
-            #     waveform = self.post_process_from_mel(x_samples)
-
-        return waveform
-
-
-    def super_resolution_and_inpainting(
+    @torch.no_grad()
+    def ddim_denoising(
         self,
-        latent_diffusion,  ##
-        text,
-        original_audio_file_path = None,
-        seed=42,
-        ddim_steps=200,
-        duration=None,
-        batchsize=1,
-        guidance_scale=2.5,
-        n_candidate_gen_per_text=3,
-        time_mask_ratio_start_and_end=(0.10, 0.15), # regenerate the 10% to 15% of the time steps in the spectrogram
-        # time_mask_ratio_start_and_end=(1.0, 1.0), # no inpainting
-        # freq_mask_ratio_start_and_end=(0.75, 1.0), # regenerate the higher 75% to 100% mel bins
-        freq_mask_ratio_start_and_end=(1.0, 1.0), # no super-resolution
-        processor=None,
-    ):
-        seed_everything(int(seed))
+        latents: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        num_inference_steps: int = 50,
+        guidance_scale: float = 7.5,
+        generator: Optional[torch.Generator] = None,
+        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
+        callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
+        callback_steps: Optional[int] = 1,
+    ) -> torch.Tensor:
+        r"""
+        DDIM Inversion 수행 후, noised latents를 다시 역방향(Denoising)으로 복원하는 메서드.
+        __call__의 과정 중 핵심 루프만 따로 뽑아온 형태다.
 
-        fn_STFT = processor.STFT
-        
-        # waveform = read_wav_file(original_audio_file_path, None)
-        mel, _, _ = processor.wav_to_fbank(original_audio_file_path, target_length=int(duration * 102.4), fn_STFT=fn_STFT)
-        
-        batch = make_batch_for_text_to_audio(text, fbank=mel[None,...], batchsize=batchsize)
+        Args:
+            latents (`torch.Tensor`):
+                이미 노이즈가 섞여 있는 latents.
+            prompt_embeds (`torch.Tensor`):
+                _encode_prompt를 통해 얻은 text condition embedding.
+            num_inference_steps (`int`, *optional*, defaults to 50):
+                DDIMScheduler로 진행할 denoising step 수.
+            guidance_scale (`float`, *optional*, defaults to 7.5):
+                Classifier-free guidance를 위한 scale 값.
+            generator (`torch.Generator`, *optional*):
+                재현성을 위한 torch.Generator.
+            cross_attention_kwargs (`dict`, *optional*):
+                cross attention 세부 설정.
+            callback (`Callable`, *optional*):
+                특정 step마다 호출할 함수.
+            callback_steps (`int`, *optional*, defaults to 1):
+                callback 함수가 호출되는 주기.
 
-        # latent_diffusion.latent_t_size = duration_to_latent_t_size(duration)
-        # latent_diffusion = set_cond_text(latent_diffusion)
+        Returns:
+            (`torch.Tensor`):
+                Denoising 후의 latents.
+        """
+        device = latents.device
+        do_classifier_free_guidance = guidance_scale > 1.0
+
+        self.scheduler.set_timesteps(num_inference_steps, device=device)
+        timesteps = self.scheduler.timesteps
+        extra_step_kwargs = self.pipe.prepare_extra_step_kwargs(generator, eta=0.0)  # DDIM eta 설정
+
+        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+
+        for i, t in enumerate(timesteps):
+            # expand latents if classifier free guidance
+            latent_model_input = (torch.cat([latents] * 2) if do_classifier_free_guidance else latents)
+            latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
+
+            # predict noise
+            noise_pred = self.unet(
+                latent_model_input,
+                t,
+                encoder_hidden_states=None,
+                class_labels=prompt_embeds,
+                cross_attention_kwargs=cross_attention_kwargs,
+            ).sample
+
+            # guidance
+            if do_classifier_free_guidance:
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+            # DDIMScheduler의 step
+            latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
+
+            # callback
+            if i == len(timesteps) - 1 or (
+                (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
+            ):
+                if callback is not None and i % callback_steps == 0:
+                    step_idx = i // getattr(self.scheduler, "order", 1)
+                    callback(step_idx, t, latents)
+
+        return latents
+
+
+
+
+
+
+
+
+
+
+
+    # ########### 여기부터 추가됨 Editing
+    # def style_transfer(
+    #     self,
+    #     text,  #
+    #     original_audio_file_path,  #
+    #     transfer_strength,  #
+    #     seed=42,
+    #     duration=10,
+    #     batchsize=1,
+    #     guidance_scale=2.5,
+    #     ddim_steps=499,
+    #     processor=None,
+    # ):
+    #     device = self.device
+    #     assert original_audio_file_path is not None, "You need to provide the original audio file path"
+    #     audio_file_duration = get_duration(original_audio_file_path)
+    #     assert get_bit_depth(original_audio_file_path) == 16, "The bit depth of the original audio file %s must be 16" % original_audio_file_path
+    #     if(duration > audio_file_duration):
+    #         print("Warning: Duration you specified %s-seconds must equal or smaller than the audio file duration %ss" % (duration, audio_file_duration))
+    #         duration = round_up_duration(audio_file_duration)
+    #         print("Set new duration as %s-seconds" % duration)
+
+    #     seed_everything(int(seed))
+
+    #     fn_STFT = processor.STFT
+
+    #     mel, _, _ = processor.read_audio_file(original_audio_file_path, target_length=int(duration * 102.4), fn_STFT=fn_STFT)
+    #     mel = mel.unsqueeze(0).unsqueeze(0).to(device)  # 1,1,t,mel
+    #     from einops import repeat
+    #     mel = repeat(mel, "1 ... -> b ...", b=batchsize)
+    #     init_latent_x = self.encode_audios(mel)  # move to latent space, encode and sample
+    #     if(torch.max(torch.abs(init_latent_x)) > 1e2):
+    #         init_latent_x = torch.clip(init_latent_x, min=-10, max=10)
+    #     sampler = DDIMSampler(self)  ### latent_diffusion
+    #     sampler.make_schedule(ddim_num_steps=ddim_steps, ddim_eta=1.0, verbose=False)  ##
+
+    #     t_enc = int(transfer_strength * ddim_steps)
+    #     prompts = text
+
+    #     with torch.no_grad():
+    #         # with self.ema_scope():
+
+    #         # uc = None
+    #         # if guidance_scale != 1.0:
+    #         #     uc = latent_diffusion.cond_stage_model.get_unconditional_condition(batchsize)
+    #         # c = latent_diffusion.get_learned_conditioning([prompts] * batchsize)
+    #         uncond, cond = self._encode_prompt(prompts=prompts).chunk(2)
+    #         print(uncond.shape, cond.shape)
+    #         z_enc = sampler.stochastic_encode(init_latent_x, torch.tensor([t_enc] * batchsize).to(device))  ##
+    #         samples = sampler.decode(z_enc, cond, t_enc, unconditional_guidance_scale=guidance_scale, unconditional_conditioning=uncond, latent_x=init_latent_x)  ##
+    #         x_samples = self.decode_latents(samples)  # decode_first_stage
+    #         x_samples = self.decode_latents(samples[:,:,:-3,:]) 
+    #         # assert x_samples.shape == mel[:,:,:-12,:].shape, f"{x_samples.shape},{mel.shape}"
+    #         # x_samples = torch.minimum(x_samples, mel[:,:,:-12,:])
+    #         waveform = self.mel_spectrogram_to_waveform(x_samples)
+        
+    #         # if audio.dim() == 2:
+    #         #     audio = audio[:, :self.original_waveform_length]
+    #         # else:
+    #         #     audio = audio[:self.original_waveform_length]
             
-        with torch.no_grad():
-            waveform = latent_diffusion.generate_sample_masked(  ##
-                [batch],
-                unconditional_guidance_scale=guidance_scale,
-                ddim_steps=ddim_steps,
-                n_candidate_gen_per_text=n_candidate_gen_per_text,
-                duration=duration,
-                time_mask_ratio_start_and_end=time_mask_ratio_start_and_end,
-                freq_mask_ratio_start_and_end=freq_mask_ratio_start_and_end
-            )
-        return waveform
+    #         # if output_type == "np":
+    #         #     audio = audio.detach().numpy()
+            
+    #         # if not return_dict:
+    #         #     return (audio,)
+    #         # return audio
+    #         #     waveform = self.post_process_from_mel(x_samples)
+
+    #     return waveform
+
     
 
 
@@ -774,4 +834,4 @@ class AudioLDM(nn.Module):
 #     torch.backends.cudnn.benchmark = True
 
 if __name__ == '__main__':
-    audioldm = AudioLDM('cuda:0')
+    audioldm = AudioLDM(device='cpu')
