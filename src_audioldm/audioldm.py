@@ -255,8 +255,8 @@ class AudioLDM(nn.Module):
 
         fn_STFT = processor.STFT
 
-        mel, _, _ = processor.wav_to_fbank(original_audio_file_path, target_length=int(duration * 102.4), fn_STFT=fn_STFT)
-        mel = mel.unsqueeze(0).unsqueeze(0).to(device)
+        mel, _, _ = processor.read_audio_file(original_audio_file_path, target_length=int(duration * 102.4), fn_STFT=fn_STFT)
+        mel = mel.unsqueeze(0).unsqueeze(0).to(device)  # 1,1,t,mel
         from einops import repeat
         mel = repeat(mel, "1 ... -> b ...", b=batchsize)
         init_latent_x = self.encode_audios(mel)  # move to latent space, encode and sample

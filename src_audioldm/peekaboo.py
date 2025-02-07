@@ -12,7 +12,7 @@ import torch.nn as nn
 from tqdm import tqdm
 import rp
 import src_audioldm.audioldm as ldm
-from src_audioldm.utilities.data.dataset_pkb import AudioDataProcessor, spectral_normalize_torch
+from audio_peekaboo.src_audioldm.utilities.data.dataprocessor import AudioDataProcessor, spectral_normalize_torch
 from src_audioldm.learnable_textures import (
     LearnableImageFourier,
     LearnableImageRasterSigmoided,
@@ -147,10 +147,10 @@ def run_peekaboo(target_text: str,
                  max_step=None):
 
     audioprocessor = AudioDataProcessor(device=device)
-    dataset = audioprocessor.preprocessing_data(audio_file_path)
-    dataset2 = audioprocessor.preprocessing_data("./best_samples/Footsteps_on_a_wooden_floor.wav")
+    dataset = audioprocessor.making_dataset(audio_file_path)
+    dataset2 = audioprocessor.making_dataset("./best_samples/Footsteps_on_a_wooden_floor.wav")
 
-    datasep1, datasep2 = audioprocessor.get_mixed_batches(dataset, dataset2)
+    datasep1, datasep2 = audioprocessor.get_mixed_sets(dataset, dataset2)
 
     '''
     {

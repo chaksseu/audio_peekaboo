@@ -7,7 +7,7 @@ sys.path.extend([proj_dir, src_dir])
 
 import soundfile as sf
 import src_audioldm.audioldm as ldm
-from src_audioldm.utilities.data.dataset_pkb import AudioDataProcessor
+from audio_peekaboo.src_audioldm.utilities.data.dataprocessor import AudioDataProcessor
 
 ldm = ldm.AudioLDM('cuda:0')
 device = ldm.device

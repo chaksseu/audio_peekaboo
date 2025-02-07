@@ -39,6 +39,11 @@ class AudioDataProcessor():
         self.mel_fmin = 0
         self.mel_fmax = 8000
 
+        self.n_freq = self.filter_length // 2 + 1
+        self.sample_length = self.sampling_rate * self.duration
+        self.pad_size = int((self.filter_length - self.hop_length) / 2)
+        self.n_times = ((self.sample_length + 2 * self.pad_size) - self.win_length // self.hop_length +1)
+
         self.STFT = Audio.stft.TacotronSTFT(
                     self.filter_length,
                     self.hop_length,
@@ -130,78 +135,105 @@ class AudioDataProcessor():
 
     # --------------------------------------------------------------------------------------------- #
 
-    def mel_spectrogram_train(self, wav_y):
-        # wav_y: ts[C,samples] in [-1,1]
-        assert torch.min(wav_y.data) >= -1, f"train min value is {torch.min(wav_y.data)}"
-        assert torch.max(wav_y.data) <= 1, f"train min value is {torch.max(wav_y.data)}"
+    def waveform_to_stft(self, waveform):  # [C,N] → [C,freq,t]
+        # waveform: ts[C,samples] = [C,163840] in [-1,1]
+        assert torch.min(waveform) >= -1, f"train min value is {torch.min(waveform)}"
+        assert torch.max(waveform) <= 1, f"train min value is {torch.max(waveform)}"
 
         if self.mel_fmax not in self.mel_basis:
-            mel = librosa_mel_fn(
+            mel_filterbank = librosa_mel_fn(
                 sr=self.sampling_rate,
                 n_fft=self.filter_length,
                 n_mels=self.n_mel,
                 fmin=self.mel_fmin,
-                fmax=self.mel_fmax,)
+                fmax=self.mel_fmax,)  # np[n_mel, n_freq=n_fft//2+1] = [64,513]
             
-            self.mel_basis[f"{self.mel_fmax}_{wav_y.device}"] = torch.from_numpy(mel).float().to(wav_y.device)
-            self.hann_window[f"{wav_y.device}"] = torch.hann_window(self.win_length).to(wav_y.device)
+            self.mel_basis[f"{self.mel_fmax}_{self.device}"] = torch.from_numpy(mel_filterbank).float().to(self.device)  # ts[n_mel, n_freq=n_fft//2+1]
+            self.hann_window[f"{self.device}"] = torch.hann_window(self.win_length).to(waveform.device)  # ts[win_length,] = [1024,]
 
-        pad_size = int((self.filter_length - self.hop_length) / 2)
-        wav_y = torch.nn.functional.pad(wav_y.unsqueeze(1), (pad_size, pad_size), mode="reflect").squeeze(1)
+        pad_size = int((self.filter_length - self.hop_length) / 2)  # (1024-160)/2 = 432
+        # waveform: [C, samples] → [C, 1, samples] → [C, 1, samples + 2*pad_size] → [C, samples + 2*pad_size] = ts[C,164704]
+        waveform = torch.nn.functional.pad(waveform.unsqueeze(1), (pad_size, pad_size), mode="reflect").squeeze(1)
 
-        stft_spec = torch.stft(
-            wav_y,
+        stft_complex = torch.stft(
+            waveform,
             self.filter_length,
             hop_length=self.hop_length,
             win_length=self.win_length,
-            window=self.hann_window[f"{wav_y.device}"],
+            window=self.hann_window[f"{self.device}"],
             center=False,
             pad_mode="reflect",
             normalized=False,
             onesided=True,
             return_complex=True,
-        )
+        )  # [C, n_freq, n_time] (complex) = ts[1,513,1024]
+        # n_freq = filter_length // 2 + 1 (onesided=True) = 513
+        # n_time = ((samples + 2*pad_size) - win_length) // hop_length + 1 = 1024
 
-        stft_spec = torch.abs(stft_spec)
+        stft_mag = torch.abs(stft_complex)  # ts[1,513,1024]
         
-        mel_basis = self.mel_basis[f"{self.mel_fmax}_{wav_y.device}"]
-        mel = spectral_normalize_torch(torch.matmul(mel_basis, stft_spec))
+        return stft_mag  # [C,freq,t]
+    
+    def stft_to_mel(self, stft):  # [C,freq,t] → [C,mel,t]
+        if len(stft.shape) != 3:
+            stft = self.reversing_stft(stft)
+        assert stft.shape[-2:] == [self.n_freq, self.n_times], f"{stft.shape}"
+        
+        mel_filterbank = self.mel_basis[f"{self.mel_fmax}_{self.device}"]  # ts[64,513]
+        # [n_mel, n_freq] x [C, n_freq, n_time] → [C, n_mel, n_time] = [C,64,1024]
+        mel_spec = spectral_normalize_torch(torch.matmul(mel_filterbank, stft))
 
-        return mel[0], stft_spec[0]
+        return mel_spec  # [C,mel,t]
+    
+    def waveform_to_mel_n_stft(self, waveform):  # ts[C,N] → logmel: [C,mel,t] / stft: [C,freq,t]
+        "process: waveform → STFT → mel 변환 → normalize"
+        stft_mag = self.waveform_to_stft(waveform)  # ts[C, n_freq, n_time] = [1,513,1024]
+        mel_spec = self.stft_to_mel(stft_mag)  # ts[C,n_mel,n_time] = [1,64,1024]
 
-    def pad_spec(self, log_mel_spec):
-        n_frames = log_mel_spec.shape[0]
+        return mel_spec, stft_mag
+
+    def pad_spec(self, spectrogram):  # [t,-] → [t,*]
+        n_frames = spectrogram.shape[0]
         p = self.target_length - n_frames
         # cut and pad
         if p > 0:
             m = torch.nn.ZeroPad2d((0, 0, 0, p))
-            log_mel_spec = m(log_mel_spec)
+            spectrogram = m(spectrogram)
         elif p < 0:
-            log_mel_spec = log_mel_spec[0 : self.target_length, :]
+            spectrogram = spectrogram[0 : self.target_length, :]
 
-        if log_mel_spec.size(-1) % 2 != 0:
-            log_mel_spec = log_mel_spec[..., :-1]
+        if spectrogram.size(-1) % 2 != 0:
+            spectrogram = spectrogram[..., :-1]
 
-        return log_mel_spec
+        return spectrogram
 
-    def wav_feature_extraction(self, waveform):  # np[C,samples] = (1, 163840)
+    def postprocess_spec(self, spectrogram, do_pad=True):  # [C,-,t]
+        spec = spectrogram[0]  # [-,t]
+        spec = spec.T.float()  # [t,-]
+        if do_pad:
+            spec = self.pad_spec(spec)  # [t,*]
+        return spec
+
+    def reversing_stft(self, stft):
+        if len(stft.shape) == 3:
+            stft = stft.squeeze(0)
+        assert stft.shape == [self.n_times, self.n_freq], f"{stft.shape}"
+        stft = stft.T.float()
+        stft = stft.unsqueeze(0)
+        return stft
+
+    def wav_feature_extraction(self, waveform, pad_stft=False):  # wav: np[C,N] → logmel: [t,mel] / stft: [t,freq]
         waveform = waveform[0, ...]  # 다채널 방지 / np[samples,] = (163840,)
-        waveform = torch.FloatTensor(waveform).unsqueeze(0).to(self.device)  # ts[samples,]
-        log_mel_spec, stft = self.mel_spectrogram_train(waveform)  # input: torch.Size([1, 163840])
+        waveform = torch.FloatTensor(waveform).unsqueeze(0).to(self.device)  # ts[1, samples]
+        log_mel_spec, stft = self.waveform_to_mel_n_stft(waveform)  # [C,mel,t] / [C,freq,t]
+        log_mel_spec = self.postprocess_spec(log_mel_spec)  # [t,mel]
+        stft = self.postprocess_spec(stft, do_pad=pad_stft)  # [t,freq]
 
-        if isinstance(log_mel_spec, np.ndarray):
-            log_mel_spec = torch.FloatTensor(log_mel_spec.T)
-            stft = torch.FloatTensor(stft.T)  #!! 여기서부터는 안되어있다고 보면 됨.
-        elif isinstance(log_mel_spec, torch.Tensor):
-            log_mel_spec = log_mel_spec.T.float()
-            stft = stft.T.float()
-        else:
-            raise TypeError("numpy array, torch.Tensor are only supported.")
+        return log_mel_spec, stft  # [t,mel], [t,freq]
 
-        log_mel_spec, stft = self.pad_spec(log_mel_spec), self.pad_spec(stft)  #!!
-        return log_mel_spec, stft
+    # --------------------------------------------------------------------------------------------- #
 
-    def read_audio_file(self, filename):
+    def read_audio_file(self, filename):  # → ts[t,mel], ts[t,freq], ts[C,samples]
         # 1. 오디오 파일 로드 또는 빈 파형 생성
         if os.path.exists(filename):
             waveform, random_start = self.read_wav_file(filename)  # np[C,samples], int
@@ -209,42 +241,41 @@ class AudioDataProcessor():
             target_length = int(self.sampling_rate * self.duration)
             waveform, random_start = torch.zeros((1, target_length)), 0  # np[C,samples], int
             print(f'Non-fatal Warning [dataset.py]: The wav path "{filename}" not found. Using empty waveform.')
-        # 2. 특성 추출 (stft spec, log mel spec)
-        log_mel_spec, stft = (None, None) if self.waveform_only else self.wav_feature_extraction(waveform)
-        return log_mel_spec, stft, waveform, random_start
-        
-    def preprocessing_data(self, file_path):
-        log_mel_spec, stft, waveform, random_start = self.read_audio_file(file_path)
         waveform = torch.FloatTensor(waveform)
 
+        # 2. 특성 추출 (stft spec, log mel spec)
+        log_mel_spec, stft = (None, None) if self.waveform_only else self.wav_feature_extraction(waveform, pad_stft=True)
+        return log_mel_spec, stft, waveform, random_start  # ts[t,mel], ts[t,freq], ts[C,samples]
+
+    def making_dataset(self, file_path):
         filename = os.path.splitext(os.path.basename(file_path))[0]
         text = filename.replace('_', ' ')
         print(text)
         if text is None:
             print("Warning: The model return None on key text", filename); text = ""
 
-
-        assert waveform.shape
-        data = {
-            "text": [text],  # list
-            "fname": [filename],  # list
-            "waveform": "" if (waveform is None) else waveform.float(),  # tensor, [B, 1, samples_num]
-            "stft": "" if (stft is None) else stft.float(),  # tensor, [B, t-steps, f-bins]          #!! 된거임
-            "log_mel_spec": "" if (log_mel_spec is None) else log_mel_spec.float(),  # tensor, [B, t-steps, mel-bins]
-            }  # return 할때 기준 shape
+        log_mel_spec, stft, waveform, random_start = self.read_audio_file(file_path)
+        
+        # return 할때 기준 shape
+        data = {  
+            "text": [text],                                                          # list[B]
+            "fname": [filename],                                                     # list[B]
+            "waveform": "" if (waveform is None) else waveform.float(),              # ts[B,1,samples_num]
+            "stft": "" if (stft is None) else stft.float(),                          # ts[B,t,f]
+            "log_mel_spec": "" if (log_mel_spec is None) else log_mel_spec.float(),  # ts[B,t,mel]
+            }
         
         for key, value in data.items():
             if key in ["waveform", "stft", "log_mel_spec"]:
-                data[key] = value.unsqueeze(0)    #!! 된거임
+                data[key] = value.unsqueeze(0)
 
         assert data["waveform"].shape == torch.Size([1, 1, 163840]), data["waveform"].shape
-        assert data["stft"].shape == torch.Size([1, 1024, 512]), data["stft"].shape
+        assert data["stft"].shape[:-1] == torch.Size([1, 1024]), data["stft"].shape
         assert data["log_mel_spec"].shape == torch.Size([1, 1024, 64]), data["log_mel_spec"].shape
-        
         return data
 
-    def get_mixed_batches(self, set1, set2, snr_db=0):
-        wav1, wav2 = set1["waveform"], set2["waveform"]
+    def get_mixed_sets(self, set1, set2, snr_db=0):
+        wav1, wav2 = set1["waveform"], set2["waveform"]  # ts[1,1,samples]
         assert wav1.shape == wav2.shape
         power1, power2 = torch.mean(wav1 ** 2), torch.mean(wav2 ** 2)
         scaling_factor = torch.sqrt(power1 / power2 * 10 ** (-snr_db/10))
@@ -252,61 +283,24 @@ class AudioDataProcessor():
         max_abs = mixed.abs().max()
         if max_abs > 1:
             mixed /= max_abs
-        mixed_wav = (mixed * 0.5).float()
-        log_mel_spec, stft = self.mel_spectrogram_train(mixed_wav[0, ...])  # input: torch.Size([1, 163840])
-        if isinstance(log_mel_spec, np.ndarray):
-            log_mel_spec = self.pad_spec(torch.FloatTensor(log_mel_spec.T)).unsqueeze(0).float()
-        elif isinstance(log_mel_spec, torch.Tensor):
-            log_mel_spec = self.pad_spec(log_mel_spec.T.float()).unsqueeze(0).float()
-        else:
-            raise TypeError("numpy array, torch.Tensor are only supported.")
-        mixed_wav, log_mel_spec, stft = mixed_wav.to(self.device), log_mel_spec.to(self.device), stft.unsqueeze(0).float().to(self.device)  #####
+        mixed_wav = (mixed * 0.5).float().squeeze(0)  # ts[1,1,samples]
+
+        log_mel_spec, stft = self.waveform_to_mel_n_stft(mixed_wav)
+        log_mel_spec = self.postprocess_spec(log_mel_spec).unsqueeze(0).float()  # [1,t,mel]
+        stft = self.postprocess_spec(stft, do_pad=False).unsqueeze(0).float()  # [1,t,freq]
         def set_dict(batch):
             return {
-                "text": batch["text"],        # List
-                "fname": batch["fname"],      # List
-                "waveform": mixed_wav,        # Tensor, [B, 1, samples_num]
-                "stft": stft,                 # Tensor, [B, f-bins, t-steps]  <-- 여기는 이거 아님
-                "log_mel_spec": log_mel_spec, # Tensor, [B, t-steps, mel-bins]
+                "text": batch["text"],                        # List, [1]
+                "fname": batch["fname"],                      # List, [1]
+                "waveform": mixed_wav.to(self.device),        # Tensor, [1, 1, samples_num]
+                "stft": stft.to(self.device),                 # Tensor, [1, t-steps, f-bins]
+                "log_mel_spec": log_mel_spec.to(self.device), # Tensor, [1, t-steps, mel-bins]
             }
         mixed_set1 = set_dict(set1)
         mixed_set2 = set_dict(set2)
         assert mixed_set1["waveform"].shape == torch.Size([1, 1, 163840]), mixed_set1["waveform"].shape
-        assert mixed_set1["stft"].shape == torch.Size([1, 513, 1024]), mixed_set1["stft"].shape
+        assert mixed_set1["stft"].shape[:-1] == torch.Size([1, 1024]), mixed_set1["stft"].shape
         assert mixed_set1["log_mel_spec"].shape == torch.Size([1, 1024, 64]), mixed_set1["log_mel_spec"].shape
 
         return (mixed_set1, mixed_set2)
-
-    ######### 추가된 부분
-    def wav_to_fbank(self, filename, target_length=1024, fn_STFT=None):
-        assert fn_STFT is not None
-
-        # mixup
-        waveform, _ = self.read_wav_file(filename)  # hop size is 160
-        waveform = waveform / np.max(np.abs(waveform))
-        waveform = 0.5 * waveform
-
-        waveform = waveform[0, ...]  # [N,]
-        waveform = torch.FloatTensor(waveform)
-
-        fbank, log_magnitudes_stft, energy = self.get_mel_from_wav(waveform, fn_STFT)
-
-        fbank = torch.FloatTensor(fbank.T)
-        log_magnitudes_stft = torch.FloatTensor(log_magnitudes_stft.T)
-
-        fbank, log_magnitudes_stft = self.pad_spec(fbank), self.pad_spec(log_magnitudes_stft)
-
-        return fbank, log_magnitudes_stft, waveform
-
-    def get_mel_from_wav(self, wav, fn_stft):
-        wav = torch.clip(torch.FloatTensor(wav).unsqueeze(0), -1, 1)  # [B,N]
-        wav = torch.autograd.Variable(wav, requires_grad=False)
-        package = fn_stft.mel_spectrogram(wav)
-        melspec, log_magnitudes_stft, energy, _ = package
-        melspec = torch.squeeze(melspec, 0).numpy().astype(np.float32)
-        log_magnitudes_stft = torch.squeeze(log_magnitudes_stft, 0).numpy().astype(np.float32)
-        energy = torch.squeeze(energy, 0).numpy().astype(np.float32)
-        return melspec, log_magnitudes_stft, energy
-    ####### 여기까지
-
     
