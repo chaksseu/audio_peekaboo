@@ -4,8 +4,6 @@ import torch
 import torchaudio
 from librosa.filters import mel as librosa_mel_fn
 
-
-
 import src_audioldm.utilities.audio as Audio
 
 def dynamic_range_compression_torch(x, C=1, clip_val=1e-5):
@@ -49,8 +47,10 @@ class AudioDataProcessor():
                     self.sampling_rate,
                     self.mel_fmin,
                     self.mel_fmax,)
-        
-    def random_segment_wav(self, waveform, target_length):
+
+    # --------------------------------------------------------------------------------------------- #
+
+    def random_segment_wav(self, waveform, target_length):  # target sample 길이에 맞게 random 추출
         waveform_length = waveform.shape[-1]
         assert waveform_length > 100, f"Waveform is too short, {waveform_length}"
         # Too short
@@ -64,31 +64,23 @@ class AudioDataProcessor():
                 return segment, random_start
         return segment, random_start
 
-    def normalize_wav(self, waveform):  # 오디오 파형을 정규화
-        MAX_AMPLITUDE = 0.5
+    def normalize_wav(self, waveform):  # waveform Normalizing
+        MAX_AMPLITUDE = 0.5  # Max amplitude를 0.5로 manually하게 limit 둠
         EPSILON = 1e-8
         centered = waveform - np.mean(waveform)
-        normalized = centered / (np.max(np.abs(centered)) + EPSILON)
-        return normalized * MAX_AMPLITUDE  # Manually limit the maximum amplitude into 0.5
+        normalized = centered / (np.max(np.abs(centered)) + EPSILON)  # in [-1,1] 
+        return normalized * MAX_AMPLITUDE    # in [-0.5,0.5]
 
-    def trim_wav_(self, waveform, threshold=0.0001, chunk_size=1000):  # wav의 시작&끝에 있는 무음 구간을 제거하는(trim) 함수
-        """      
-        Args:
-            waveform: 입력 오디오 파형
-            threshold: 무음으로 간주할 진폭 임계값
-            chunk_size: 한 번에 처리할 샘플 수
-        """
+    def trim_wav_(self, waveform, threshold=0.0001, chunk_size=1000):  # wav 시작&끝의 무음 구간을 제거하는(trim) 함수
         if np.max(np.abs(waveform)) < threshold:
             return waveform
         def find_sound_boundary(samples, reverse=False):
             length = samples.shape[0]
-            pos = length if reverse else 0
-            limit = 0 if reverse else length
-            step = -chunk_size if reverse else chunk_size
+            pos, limit, step = (length, 0, -chunk_size) if reverse else (0, length, chunk_size)
             
-            while (pos - step if reverse else pos + chunk_size) > limit:
-                chunk_start = pos - chunk_size if reverse else pos
-                chunk_end = pos if reverse else pos + chunk_size
+            while ((pos - step) if reverse else (pos + chunk_size)) > limit:
+                chunk_start = (pos - chunk_size) if reverse else pos
+                chunk_end = pos if reverse else (pos + chunk_size)
                 if np.max(np.abs(samples[chunk_start:chunk_end])) < threshold:
                     pos += step
                 else:
@@ -98,7 +90,7 @@ class AudioDataProcessor():
         end = find_sound_boundary(waveform, reverse=True)
         return waveform[start:end]
 
-    def random_uniform(self, start, end):
+    def random_uniform(self, start, end):  # 주어진 범위 내에서 uniform scalar sampling
         val = torch.rand(1).item()
         return start + (end - start) * val
 
@@ -108,37 +100,40 @@ class AudioDataProcessor():
 
         if waveform_length == target_length:
             return waveform
-        # Pad
+        # Padding (target length가 waveform length보다 더 긴 경우만 처리하면 됨)
         padded_wav = np.zeros((1, target_length), dtype=np.float32)
-        start_pos = 0 if self.pad_wav_start_sample else int(self.random_uniform(0, target_length - waveform_length))
+        random_start = int(self.random_uniform(0, target_length - waveform_length))
+        start_pos = 0 if self.pad_wav_start_sample else random_start
         
         padded_wav[:, start_pos:start_pos + waveform_length] = waveform
         return padded_wav
 
     def read_wav_file(self, filename):  # 오디오 파일을 읽고 전처리
-        waveform, original_sr = torchaudio.load(filename)                            # 1. 파일 로드
-        target_samples = int(original_sr * self.duration)                             # 2. 랜덤 세그먼트 추출
+        # 1. 파일 로드
+        waveform, original_sr = torchaudio.load(filename)  # ts[C,original_samples]
+        target_samples = int(original_sr * self.duration)  # original samples 길이
+        # 2. random segment 추출 (target samples를 충족하는 선에서)
         waveform, random_start = self.random_segment_wav(waveform, target_samples)
-        waveform = torchaudio.functional.resample(waveform, original_sr, self.sampling_rate)  # 3. 리샘플링
-                                                                                        # 4. 전처리 단계
-        waveform = waveform.numpy()[0, ...]                                           #     numpy 변환 및 첫 번째 채널 선택
-        waveform = self.normalize_wav(waveform)                                       #     정규화
+        # 3. resampling (설정한 sr에 맞게 변환)
+        waveform = torchaudio.functional.resample(waveform, original_sr, self.sampling_rate)  # ts[C,target_samples]
+        # 4. 전처리 단계
+        waveform = waveform.numpy()[0, ...]  # numpy 변환 & 1st channel 선택 / np[target_samples,]
+        waveform = self.normalize_wav(waveform)  # centering & Norm [-0.5,0.5]
         if self.trim_wav:
-            waveform = self.trim_wav_(waveform)                                        #     무음 구간 제거
-                                                                                        # 5. 최종 형태로 변환
-        waveform = waveform[None, ...]                                                #     채널 차원 추가
-        target_length = int(self.sampling_rate * self.duration)
-        waveform = self.pad_wav(waveform, target_length)                              #     패딩
-        
-        return waveform, random_start
+            waveform = self.trim_wav_(waveform)  # 무음 구간 제거
+        # 5. 최종 형태로 변환
+        waveform = waveform[None, ...]  # channel dim 추가 / np[C,target_samples]
+        target_length = int(self.sampling_rate * self.duration)  # 최종 target samples 길이
+        waveform = self.pad_wav(waveform, target_length)  # padding if wav is short
+        # waveform = self.normalize_wav(waveform)  #! github main code에서는 한번 더 Norm 했음
+        return waveform, random_start  # np[C,target_samples], int
 
     # --------------------------------------------------------------------------------------------- #
 
     def mel_spectrogram_train(self, wav_y):
-        if torch.min(wav_y) < -1.0:
-            print("train min value is ", torch.min(wav_y))
-        if torch.max(wav_y) > 1.0:
-            print("train max value is ", torch.max(wav_y))
+        # wav_y: ts[C,samples] in [-1,1]
+        assert torch.min(wav_y.data) >= -1, f"train min value is {torch.min(wav_y.data)}"
+        assert torch.max(wav_y.data) <= 1, f"train min value is {torch.max(wav_y.data)}"
 
         if self.mel_fmax not in self.mel_basis:
             mel = librosa_mel_fn(
@@ -189,10 +184,10 @@ class AudioDataProcessor():
 
         return log_mel_spec
 
-    def wav_feature_extraction(self, waveform):  # (1, 163840)
-        waveform = waveform[0, ...]  # (163840,)
-        waveform = torch.FloatTensor(waveform).to(self.device)
-        log_mel_spec, stft = self.mel_spectrogram_train(waveform.unsqueeze(0))  # input: torch.Size([1, 163840])
+    def wav_feature_extraction(self, waveform):  # np[C,samples] = (1, 163840)
+        waveform = waveform[0, ...]  # 다채널 방지 / np[samples,] = (163840,)
+        waveform = torch.FloatTensor(waveform).unsqueeze(0).to(self.device)  # ts[samples,]
+        log_mel_spec, stft = self.mel_spectrogram_train(waveform)  # input: torch.Size([1, 163840])
 
         if isinstance(log_mel_spec, np.ndarray):
             log_mel_spec = torch.FloatTensor(log_mel_spec.T)
@@ -209,13 +204,12 @@ class AudioDataProcessor():
     def read_audio_file(self, filename):
         # 1. 오디오 파일 로드 또는 빈 파형 생성
         if os.path.exists(filename):
-            waveform, random_start = self.read_wav_file(filename)
+            waveform, random_start = self.read_wav_file(filename)  # np[C,samples], int
         else:
             target_length = int(self.sampling_rate * self.duration)
-            waveform = torch.zeros((1, target_length))
-            random_start = 0
+            waveform, random_start = torch.zeros((1, target_length)), 0  # np[C,samples], int
             print(f'Non-fatal Warning [dataset.py]: The wav path "{filename}" not found. Using empty waveform.')
-        # 2. 특성 추출 (필요한 경우)
+        # 2. 특성 추출 (stft spec, log mel spec)
         log_mel_spec, stft = (None, None) if self.waveform_only else self.wav_feature_extraction(waveform)
         return log_mel_spec, stft, waveform, random_start
         
@@ -292,7 +286,7 @@ class AudioDataProcessor():
         waveform = waveform / np.max(np.abs(waveform))
         waveform = 0.5 * waveform
 
-        waveform = waveform[0, ...]
+        waveform = waveform[0, ...]  # [N,]
         waveform = torch.FloatTensor(waveform)
 
         fbank, log_magnitudes_stft, energy = self.get_mel_from_wav(waveform, fn_STFT)
@@ -305,15 +299,12 @@ class AudioDataProcessor():
         return fbank, log_magnitudes_stft, waveform
 
     def get_mel_from_wav(self, wav, fn_stft):
-        wav = torch.clip(torch.FloatTensor(wav).unsqueeze(0), -1, 1)
+        wav = torch.clip(torch.FloatTensor(wav).unsqueeze(0), -1, 1)  # [B,N]
         wav = torch.autograd.Variable(wav, requires_grad=False)
         package = fn_stft.mel_spectrogram(wav)
-        print(package)
         melspec, log_magnitudes_stft, energy, _ = package
-        for i in package:
-            print(i.shape)
         melspec = torch.squeeze(melspec, 0).numpy().astype(np.float32)
-        log_magnitudes_stft = (torch.squeeze(log_magnitudes_stft, 0).numpy().astype(np.float32))
+        log_magnitudes_stft = torch.squeeze(log_magnitudes_stft, 0).numpy().astype(np.float32)
         energy = torch.squeeze(energy, 0).numpy().astype(np.float32)
         return melspec, log_magnitudes_stft, energy
     ####### 여기까지

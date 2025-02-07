@@ -1,5 +1,20 @@
 from diffusers import AudioLDMPipeline
 import os
+
+pipe = AudioLDMPipeline.from_pretrained("cvssp/audioldm")
+print(pipe)
+
+# 수정된 코드
+# components = pipe.components.keys()
+# for i in components:
+#     print(pipe.components[i])
+
+for i in pipe.config.keys():
+    print(pipe.config[i])
+
+raise ValueError
+
+
 # hf_pipe = AudioLDMPipeline.from_pretrained(pretrained_model_name_or_path="cvssp/audioldm-s-full")
 
 # print("UNet config:", hf_pipe.unet.config)
