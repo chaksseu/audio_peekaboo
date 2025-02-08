@@ -172,8 +172,6 @@ class AudioLDM(nn.Module):
         return prompt_embeds\
 
     def encode_audios(self, x):
-        # x = x.half()  ##
-        # print(x.dtype)
         encoder_posterior = self.vae.encode(x)
         unscaled_z = encoder_posterior.latent_dist.sample()
         # self.scale_factor = 1.0 / z.flatten().std()  # Normalize z to have std=1  #### 둘 다 값 확인해보고 뭐 쓸지 결정
@@ -199,14 +197,15 @@ class AudioLDM(nn.Module):
         else:
             raise ValueError
         waveform = waveform.detach().squeeze(0).cpu().float().numpy()
-        print(waveform.shape)
-        return waveform
+
+        return waveform  # [samples,]
 
     @torch.no_grad()
     def ddim_noising(
         self,
         latents: torch.Tensor,
         num_inference_steps: int = 50,
+        transfer_strength: int = 1,
     ) -> torch.Tensor:
         r"""
         DDIM Inversion을 위해, 이미 얻은 latents에 time step을 거치며 노이즈를 추가(Forward pass)하는 메서드.
@@ -226,13 +225,17 @@ class AudioLDM(nn.Module):
         """
         device = latents.device
         # DDIM 전용 Scheduler라고 가정
-        self.scheduler.set_timesteps(num_inference_steps, device=device)
-        timesteps = self.scheduler.timesteps
 
+        self.scheduler.set_timesteps(num_inference_steps, device=device)  
+        all_timesteps = self.scheduler.timesteps  # 길이 50의 텐서 ex) [980, 960, ..., 0]
+
+        t_enc = int(transfer_strength * num_inference_steps)
+        used_timesteps = all_timesteps[-t_enc:]
+        print(used_timesteps)
         noisy_latents = latents.clone()
 
         # forward로 t=0 -> t=1 ... -> t=T 방향으로 노이즈 주입
-        for i, t in enumerate(timesteps):
+        for i, t in enumerate(reversed(used_timesteps)):
             noise = torch.randn_like(noisy_latents)
             # add_noise는 DDIMScheduler나 비슷한 스케줄러에 구현됨
             noisy_latents = self.scheduler.add_noise(noisy_latents, noise, t)
@@ -245,6 +248,7 @@ class AudioLDM(nn.Module):
         latents: torch.Tensor,
         prompt_embeds: torch.Tensor,
         num_inference_steps: int = 50,
+        transfer_strength: int = 1,
         guidance_scale: float = 7.5,
         cross_attention_kwargs: Optional[Dict[str, Any]] = None,
         callback: Optional[Callable[[int, int, torch.Tensor], None]] = None,
@@ -263,8 +267,6 @@ class AudioLDM(nn.Module):
                 DDIMScheduler로 진행할 denoising step 수.
             guidance_scale (`float`, *optional*, defaults to 7.5):
                 Classifier-free guidance를 위한 scale 값.
-            generator (`torch.Generator`, *optional*):
-                재현성을 위한 torch.Generator.
             cross_attention_kwargs (`dict`, *optional*):
                 cross attention 세부 설정.
             callback (`Callable`, *optional*):
@@ -279,13 +281,19 @@ class AudioLDM(nn.Module):
         device = latents.device
         do_classifier_free_guidance = guidance_scale > 1.0
 
-        self.scheduler.set_timesteps(num_inference_steps, device=device)
-        timesteps = self.scheduler.timesteps
+        self.scheduler.set_timesteps(num_inference_steps, device=device)  
+        all_timesteps = self.scheduler.timesteps
+
+        t_enc = int(transfer_strength * num_inference_steps)
+        used_timesteps = all_timesteps[-t_enc:]
+        print(used_timesteps)
+        
         extra_step_kwargs = self.pipe.prepare_extra_step_kwargs(generator=None, eta=0.0)  # DDIM eta 설정
 
-        num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
+        num_warmup_steps = len(used_timesteps) - t_enc * self.scheduler.order
+        print(num_warmup_steps)
 
-        for i, t in enumerate(timesteps):
+        for i, t in enumerate(used_timesteps):
             # expand latents if classifier free guidance
             latent_model_input = (torch.cat([latents] * 2) if do_classifier_free_guidance else latents)
             latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
@@ -308,7 +316,7 @@ class AudioLDM(nn.Module):
             latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
             # callback
-            if i == len(timesteps) - 1 or (
+            if i == len(used_timesteps) - 1 or (
                 (i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0
             ):
                 if callback is not None and i % callback_steps == 0:
@@ -395,7 +403,7 @@ class AudioLDM(nn.Module):
 
         # ========== DDIM Inversion (noising) ==========
         # transfer_strength를 기반으로 t_enc 계산
-        t_enc = int(transfer_strength * ddim_steps)
+        # t_enc = int(transfer_strength * ddim_steps)
         # prompt encoding
         # classifier-free guidance를 위해 uncond, cond 분리
         # 예시로, _encode_prompt에서 return을 torch.cat([uncond, cond]) 형태로 했다면 .chunk(2) 등으로 분리
@@ -410,6 +418,7 @@ class AudioLDM(nn.Module):
         noisy_latents = self.ddim_noising(
             latents=init_latent_x,
             num_inference_steps=ddim_steps,  # 전체 step
+            transfer_strength=transfer_strength,
         )
         # 위 예시는 전체 ddim_steps로 noise를 넣었지만, t_enc까지만 넣고 싶다면 적절히 조정
         
@@ -423,6 +432,7 @@ class AudioLDM(nn.Module):
             latents=noisy_latents,
             prompt_embeds=torch.cat([uncond_embeds, cond_embeds]),
             num_inference_steps=ddim_steps,
+            transfer_strength=transfer_strength,
             guidance_scale=guidance_scale,
         )
 
