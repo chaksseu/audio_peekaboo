@@ -33,6 +33,7 @@ def iterative_audio_transform(
             transfer_strength=transfer_strength,
             guidance_scale=guidance_scale,
             ddim_steps=ddim_steps,
+            clipping = True,
         )
         if i % 1 == 0:
             # 변환된 오디오 저장
@@ -76,8 +77,8 @@ if __name__ == "__main__":
         ldm=aldm, processor=processor,
         initial_audio=initial_audio_path,
         target_text=target_text,
-        ddim_steps=20,
-        transfer_strength=0.7,
-        num_iterations=5,
+        ddim_steps=25,
+        transfer_strength=0.15,
+        num_iterations=10,
         guidance_scale=2.5,
         )

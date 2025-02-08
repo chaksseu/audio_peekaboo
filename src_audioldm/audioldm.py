@@ -336,6 +336,7 @@ class AudioLDM(nn.Module):
         guidance_scale: float,
         ddim_steps: int,
         return_type: str = "pt",  # "pt" or "np"
+        clipping = False,
     ):
         """
         오디오 파일에서 mel spectrogram 추출 후,
@@ -439,6 +440,10 @@ class AudioLDM(nn.Module):
         # ========== latent -> waveform ==========
         # mel spectrogram 복원
         mel_spectrogram = self.decode_latents(edited_latents)
+        
+        if clipping:
+            mel_spectrogram = torch.maximum(torch.minimum(mel_spectrogram, mel), mel)
+
         # waveform 변환
         edited_waveform = self.mel_to_waveform(mel_spectrogram)
 
