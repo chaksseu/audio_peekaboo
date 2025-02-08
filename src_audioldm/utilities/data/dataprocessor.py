@@ -130,7 +130,7 @@ class AudioDataProcessor():
         waveform = waveform[None, ...]  # channel dim 추가 / np[C,target_samples]
         target_length = int(self.sampling_rate * self.duration)  # 최종 target samples 길이
         waveform = self.pad_wav(waveform, target_length)  # padding if wav is short
-        # waveform = self.normalize_wav(waveform)  #! github main code에서는 한번 더 Norm 했음
+        waveform = self.normalize_wav(waveform)  #! github main code에서는 한번 더 Norm 했음
         return waveform, random_start  # np[C,target_samples], int
 
     # --------------------------------------------------------------------------------------------- #
@@ -181,6 +181,7 @@ class AudioDataProcessor():
         
         mel_filterbank = self.mel_basis[f"{self.mel_fmax}_{self.device}"]  # ts[64,513]
         # [n_mel, n_freq] x [C, n_freq, n_time] → [C, n_mel, n_time] = [C,64,1024]
+        stft = stft.to(self.device)
         mel_spec = spectral_normalize_torch(torch.matmul(mel_filterbank, stft))
 
         return mel_spec  # [C,mel,t]
@@ -278,7 +279,8 @@ class AudioDataProcessor():
         wav1, wav2 = set1["waveform"], set2["waveform"]  # ts[1,1,samples]
         assert wav1.shape == wav2.shape
         power1, power2 = torch.mean(wav1 ** 2), torch.mean(wav2 ** 2)
-        scaling_factor = torch.sqrt(power1 / power2 * 10 ** (-snr_db/10))
+        print(power1, power2)
+        scaling_factor = torch.sqrt(power1 / (power2 + 1e-7) * 10 ** (-snr_db/10))
         mixed = wav1 + wav2 * scaling_factor
         max_abs = mixed.abs().max()
         if max_abs > 1:
@@ -292,7 +294,7 @@ class AudioDataProcessor():
             return {
                 "text": batch["text"],                        # List, [1]
                 "fname": batch["fname"],                      # List, [1]
-                "waveform": mixed_wav.to(self.device),        # Tensor, [1, 1, samples_num]
+                "waveform": mixed_wav.unsqueeze(0).to(self.device),        # Tensor, [1, 1, samples_num]
                 "stft": stft.to(self.device),                 # Tensor, [1, t-steps, f-bins]
                 "log_mel_spec": log_mel_spec.to(self.device), # Tensor, [1, t-steps, mel-bins]
             }
