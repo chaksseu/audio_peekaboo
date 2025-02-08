@@ -7,7 +7,7 @@ sys.path.extend([proj_dir, src_dir])
 
 import soundfile as sf
 import src_audioldm.audioldm as ldm
-from audio_peekaboo.src_audioldm.utilities.data.dataprocessor import AudioDataProcessor
+from src_audioldm.utilities.data.dataprocessor import AudioDataProcessor
 
 ldm = ldm.AudioLDM('cuda:0')
 device = ldm.device
@@ -36,23 +36,32 @@ def iterative_audio_transform(ldm, audioprocessor, initial_audio, target_text, t
         # 다음 단계의 입력 오디오를 현재 출력으로 설정
         current_audio = output_audio
 
-
-def run_peekaboo(target_text: str,):
+if __name__ == "__main__":
 
     audioprocessor = AudioDataProcessor(device=device)
 
     # 예제 실행
-    initial_audio_path = "./strength08_n5/a_cat_n_stepping_wood.wav"
-    target_text = "A cat meowing"
-    transfer_strength = 0.8
+    initial_audio_path = "./a_cat_n_stepping_wood.wav"
+    target_text = "A dog barking"
+    transfer_strength = 1
     num_iterations = 10  # 반복 횟수 (att2.wav ~ att6.wav 생성)
 
-    iterative_audio_transform(ldm, audioprocessor, initial_audio_path, target_text, transfer_strength, num_iterations)
+    mel, _, _, _ = audioprocessor.read_audio_file(initial_audio_path)
 
-    raise ValueError
+    waveform = ldm.edit_audio_with_ddim(
+        mel=mel,
+        text=target_text,
+        duration=10.24,
+        batch_size=1,
+        transfer_strength=1,
+        guidance_scale=2.5,
+        ddim_steps=500,
+    )
 
-if __name__ == "__main__":
+    print(waveform.shape)
+    output_audio = './result3.wav'
 
-    run_peekaboo(
-        target_text='A cat meowing',
-        )
+    sf.write(output_audio, waveform, 16000)
+
+
+    # iterative_audio_transform(ldm, audioprocessor, initial_audio_path, target_text, transfer_strength, num_iterations)

@@ -42,7 +42,7 @@ class AudioDataProcessor():
         self.n_freq = self.filter_length // 2 + 1
         self.sample_length = self.sampling_rate * self.duration
         self.pad_size = int((self.filter_length - self.hop_length) / 2)
-        self.n_times = ((self.sample_length + 2 * self.pad_size) - self.win_length // self.hop_length +1)
+        self.n_times = int(((self.sample_length + 2 * self.pad_size) - self.win_length) // self.hop_length +1)
 
         # self.STFT = Audio.stft.TacotronSTFT(
         #             self.filter_length,
@@ -177,7 +177,7 @@ class AudioDataProcessor():
     def stft_to_mel(self, stft):  # [C,freq,t] → [C,mel,t]
         if len(stft.shape) != 3:
             stft = self.reversing_stft(stft)
-        assert stft.shape[-2:] == [self.n_freq, self.n_times], f"{stft.shape}"
+        assert stft.shape[-2:] == torch.Size([self.n_freq, self.n_times]), f"{stft.shape[-2:]}{self.n_freq}{self.n_times}"
         
         mel_filterbank = self.mel_basis[f"{self.mel_fmax}_{self.device}"]  # ts[64,513]
         # [n_mel, n_freq] x [C, n_freq, n_time] → [C, n_mel, n_time] = [C,64,1024]
@@ -217,7 +217,7 @@ class AudioDataProcessor():
     def reversing_stft(self, stft):
         if len(stft.shape) == 3:
             stft = stft.squeeze(0)
-        assert stft.shape == [self.n_times, self.n_freq], f"{stft.shape}"
+        assert stft.shape == torch.Size([self.n_times, self.n_freq]), f"{stft.shape}"
         stft = stft.T.float()
         stft = stft.unsqueeze(0)
         return stft
