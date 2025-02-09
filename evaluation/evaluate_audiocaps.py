@@ -2,7 +2,7 @@ import os
 import sys
 import re
 from typing import Dict, List
-import traceback
+# import traceback
 
 proj_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 src_dir = os.path.join(proj_dir, 'src')
@@ -124,8 +124,9 @@ class AudioCapsEvaluator:
                     source, rand_start = pcr.read_wav_file(source_path)  # np[1,N,]
                     mixture, rand_start = pcr.read_wav_file(mixture_path)
 
+                    ########################
                     current_wav = mixture
-                    for i in range(5):
+                    for i in range(1):
                         mixture_mel, _ = pcr.wav_feature_extraction(current_wav, pad_stft=True)
                         edited_waveform = aldm.mel_to_waveform(mixture_mel)
                         current_wav = edited_waveform[None, ...]
@@ -135,8 +136,47 @@ class AudioCapsEvaluator:
                         sdr = calculate_sisdr(mixture,mixture)
                         print(sdr)
                     
-                    sf.write('./time_align_shit.wav',current_wav.squeeze(0),16000)
-                    sf.write('./origin.wav', mixture.squeeze(0), 16000)
+
+                    curr = current_wav.squeeze(0)
+                    mix = mixture.squeeze(0)
+
+
+                    import matplotlib.pyplot as plt
+                    import scipy.io.wavfile as wav
+                    import librosa.display as ld  
+
+                    def plot_wav_mel(wav_paths, save_path="./test/waveform_mel.png"):
+                        fig, axes = plt.subplots(2, len(wav_paths), figsize=(4 * len(wav_paths), 6))
+
+                        for i, wav_path in enumerate(wav_paths):
+                            sr, data = wav.read(wav_path)
+                            time = np.linspace(0, len(data) / sr, num=len(data))
+                            
+                            # Waveform
+                            axes[0, i].plot(time, data, lw=0.5)
+                            axes[0, i].set_title(f"Waveform {i+1}")
+                            axes[0, i].set_xlabel("Time (s)")
+                            axes[0, i].set_ylabel("Amplitude")
+
+                            # Mel Spectrogram
+                            y, sr = librosa.load(wav_path, sr=None)
+                            mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+                            mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+                            ld.specshow(mel_spec_db, sr=sr, x_axis="time", y_axis="mel", ax=axes[1, i])
+                            axes[1, i].set_title(f"Mel Spectrogram {i+1}")
+
+                        plt.tight_layout()
+                        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                        plt.close()
+
+                    wavs = ['./test/origin.wav',
+                    './test/time_align_shit.wav',
+                    './test/orig.wav',
+                    './test/noised.wav',]
+
+                    plot_wav_mel(wavs)
+
+
 
                     raise ValueError
                     sdr = calculate_sisdr(mixture,edited_waveform)
@@ -213,7 +253,7 @@ class AudioCapsEvaluator:
 
         except Exception as e:
             print(f"Error: {e}")
-            traceback.print_exc()
+            # traceback.print_exc()
 
         finally:
             mean_sisdr = np.mean(sisdrs_list)
