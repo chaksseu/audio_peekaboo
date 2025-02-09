@@ -71,14 +71,6 @@ class AudioLDM(nn.Module):
         print(f'[INFO] audioldm.py: loaded AudioLDM!')
     
     def get_input(self, batch, key):
-        '''
-        fname = batch["fname"]
-        text = batch["text"]
-        label_indices = batch["label_vector"]
-        waveform = batch["waveform"]
-        stft = batch["stft"]
-        mel = batch["log_mel_spec"]
-        '''
         return_format = {
             "fname": batch["fname"],
             "text": batch["text"],
@@ -191,6 +183,8 @@ class AudioLDM(nn.Module):
 
         waveform = self.vocoder(mel_spectrogram)
         # we always cast to float32 as this does not cause significant overhead and is compatible with bfloat16
+        # assert waveform.shape[1]==self.original_waveform_length, f'{waveform.shape}'
+        print(waveform.shape)
         if waveform.dim() == 2:
             waveform = waveform[:, :self.original_waveform_length]
         elif waveform.dim() == 1:

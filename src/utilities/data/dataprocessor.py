@@ -18,12 +18,14 @@ class AudioDataProcessor():
         self.device = device
 
         self.pad_wav_start_sample = 0
-        self.trim_wav = False
+        self.do_trim_wav = False
         self.waveform_only = False
+        self.do_random_segment = False
 
         self.melbins = 64     # 중복
         self.sampling_rate = 16000  # 중복
         self.hopsize = 160    # 중복
+        # self.duration = 10.24
         self.duration = 10.24
         self.target_length = 1024
         self.mixup = 0.0
@@ -115,16 +117,19 @@ class AudioDataProcessor():
 
     def read_wav_file(self, filename):  # 오디오 파일을 읽고 전처리
         # 1. 파일 로드
-        waveform, original_sr = torchaudio.load(filename)  # ts[C,original_samples]
+        waveform, original_sr = torchaudio.load(filename, normalize=True)  # ts[C,original_samples]
+        waveform = waveform.mean(dim=0) if waveform.shape[0] > 1 else waveform  # mono 변환
         target_samples = int(original_sr * self.duration)  # original samples 길이
         # 2. random segment 추출 (target samples를 충족하는 선에서)
-        waveform, random_start = self.random_segment_wav(waveform, target_samples)
+        random_start = None
+        if self.do_random_segment:
+            waveform, random_start = self.random_segment_wav(waveform, target_samples)
         # 3. resampling (설정한 sr에 맞게 변환)
         waveform = torchaudio.functional.resample(waveform, original_sr, self.sampling_rate)  # ts[C,target_samples]
         # 4. 전처리 단계
         waveform = waveform.numpy()[0, ...]  # numpy 변환 & 1st channel 선택 / np[target_samples,]
         waveform = self.normalize_wav(waveform)  # centering & Norm [-0.5,0.5]
-        if self.trim_wav:
+        if self.do_trim_wav:
             waveform = self.trim_wav_(waveform)  # 무음 구간 제거
         # 5. 최종 형태로 변환
         waveform = waveform[None, ...]  # channel dim 추가 / np[C,target_samples]
@@ -245,7 +250,7 @@ class AudioDataProcessor():
         waveform = torch.FloatTensor(waveform)
 
         # 2. 특성 추출 (stft spec, log mel spec)
-        log_mel_spec, stft = (None, None) if self.waveform_only else self.wav_feature_extraction(waveform, pad_stft=True)
+        log_mel_spec, stft = (None, None) if self.waveform_only else self.wav_feature_extraction(waveform, pad_stft=True)  # input: [1,N]
         return log_mel_spec, stft, waveform, random_start  # ts[t,mel], ts[t,freq], ts[C,samples]
 
     def making_dataset(self, file_path):
