@@ -22,12 +22,6 @@ thumbnails
 
 best_samples
 samples
-peekaboo_results_test_setting
-strength*
-sampling/
-a_cat_n_stepping_wood.wav
-t2*
-t02*
-t07*
-step*
 *.wav
+
+evaluation/data

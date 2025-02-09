@@ -6,8 +6,8 @@ src_dir = os.path.join(proj_dir, 'src_audioldm')
 sys.path.extend([proj_dir, src_dir])
 
 import soundfile as sf
-import src_audioldm.audioldm as ldm
-from src_audioldm.utilities.data.dataprocessor import AudioDataProcessor
+from src.audioldm import AudioLDM as ldm
+from src.utilities.data.dataprocessor import AudioDataProcessor as prcssr
 
 
 def iterative_audio_transform(
@@ -45,27 +45,11 @@ def iterative_audio_transform(
 
 if __name__ == "__main__":
 
-    aldm = ldm.AudioLDM('cuda:0')
+    aldm = ldm('cuda:0')
     device = aldm.device
-    processor = AudioDataProcessor(device=device)
+    processor = prcssr(device=device)
 
-    # set1 = processor.making_dataset("./best_samples/Footsteps_on_a_wooden_floor.wav")
-    # set2 = processor.making_dataset("./best_samples/Techno_music_with_a_strong__upbeat_tempo_and_high_melodic_riffs.wav")
-    
-    # mixed1, mixed2 = processor.get_mixed_sets(set1, set2, snr_db=3)
-    
-    # audio = set1['waveform'].squeeze(0).squeeze(0).detach().cpu().float().numpy()
-
-    # sf.write('./birds.wav', audio, 16000)
-    # audio = set2['waveform'].squeeze(0).squeeze(0).detach().cpu().float().numpy()
-
-    # sf.write('./Techno.wav', audio, 16000)
-
-    # audio = mixed2['waveform'].squeeze(0).squeeze(0).detach().cpu().float().numpy()
-
-    # sf.write('./Footsteps_n_techno.wav', audio, 16000)
-
-    # 예제 실행
+    # setting
     initial_audio_path = "./a_cat_n_stepping_wood.wav"
     # name = 'A_cat_meowing'
     name = "A_cat_meowing"

@@ -11,13 +11,12 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 import rp
-import src_audioldm.audioldm as ldm
-from audio_peekaboo.src_audioldm.utilities.data.dataprocessor import AudioDataProcessor, spectral_normalize_torch
-from src_audioldm.learnable_textures import (
+import src.audioldm as ldm
+from src.utilities.data.dataprocessor import AudioDataProcessor, spectral_normalize_torch
+from pkboo.learnable_textures import (
     LearnableImageFourier,
     LearnableImageRasterSigmoided,
 )
-from src_audioldm.learnable_textures2 import AudioMaskGeneratorCNN, AudioMaskGeneratorTransformer
 
 ldm = ldm.AudioLDM('cuda:0')
 device = ldm.device
@@ -26,8 +25,7 @@ def make_learnable_image(height, width, num_channels, representation='fourier'):
     image_types = {
         'fourier': LearnableImageFourier(height, width, num_channels),
         'raster': LearnableImageRasterSigmoided(height, width, num_channels),
-        'cnn': AudioMaskGeneratorCNN(height, width, num_channels),
-        'transformer': AudioMaskGeneratorTransformer(height, width, num_channels),}
+    }
     return image_types.get(representation, ValueError(f'Invalid method: {representation}'))
 
 def blend_torch_images(foreground, background, alpha):

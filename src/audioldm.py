@@ -7,7 +7,6 @@ from diffusers import (
    AutoencoderKL,
    UNet2DConditionModel,
    DDIMScheduler,
-   PNDMScheduler,
 )
 from transformers import (
    ClapTextModelWithProjection,
@@ -33,11 +32,13 @@ class AudioLDM(nn.Module):
         # Initialize pipeline with PNDM scheduler (load from pipeline. let us use dreambooth models.)
         pipe = AudioLDMPipeline.from_pretrained(repo_id)  # torch_dtype=torch.float16
         
+        '''
         #### 둘중 택일
         ## pipe.scheduler=PNDMScheduler(beta_start=0.00085,beta_end=0.012,beta_schedule="scaled_linear",num_train_timesteps=self.num_train_timesteps)
         # pipe.scheduler = PNDMScheduler.from_config(pipe.scheduler.config)
         # pipe.scheduler.config.skip_prk_steps = True  # PNDM의 초기 단계 스킵
         # pipe.scheduler.config.set_alpha_to_one = False  # DDIM과 비슷한 scaling 유지
+        '''
 
         # Setup components and move to device
         self.pipe = pipe
