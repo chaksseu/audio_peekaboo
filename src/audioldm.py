@@ -189,18 +189,18 @@ class AudioLDM(nn.Module):
             prompt_embeds = torch.cat([uncond_prompt_embeds, prompt_embeds])  # 1st [B,512]: uncond, 2nd [B,512] columns: cond
         return prompt_embeds  # ts[2*B,512]
 
-    def encode_audios(self, x):  # ts[B,1,T:1024,M:64] -> ts[B,C:8,lT:256,lM:16]
+    def encode_audios(self, x):  # ts[B, 1, T:1024, M:64] -> ts[B, C:8, lT:256, lM:16]
         encoder_posterior = self.vae.encode(x)
         unscaled_z = encoder_posterior.latent_dist.sample()
         z = unscaled_z * self.vae.config.scaling_factor  # Normalize z to have std=1 / factor: 0.9227914214134216
         return z
 
-    def decode_latents(self, latents):  # ts[B,C:8,lT:256,lM:16] -> ts[B,1,T:1024,M:64]
+    def decode_latents(self, latents):  # ts[B, C:8, lT:256, lM:16] -> ts[B, 1, T:1024, M:64]
         latents = 1 / self.vae.config.scaling_factor * latents
         mel_spectrogram = self.vae.decode(latents).sample
         return mel_spectrogram
 
-    def mel_to_waveform(self, mel_spectrogram):  # ts[B,1,T:1024,M:64] -> ts[B,N:163872]
+    def mel_to_waveform(self, mel_spectrogram):  # ts[B, 1, T:1024, M:64] -> ts[B, N:163872]
         if mel_spectrogram.dim() == 4:
             mel_spectrogram = mel_spectrogram.squeeze(1)
         elif mel_spectrogram.dim() == 2:
@@ -213,7 +213,7 @@ class AudioLDM(nn.Module):
         return waveform  # ts[B,163872]
 
     @torch.no_grad()
-    def ddim_noising(  # ts[B,C:8,lT:256,lM:16] -> ts[B,C:8,lT:256,lM:16]
+    def ddim_noising(  # ts[B, C:8, lT:256, lM:16] -> ts[B, C:8, lT:256, lM:16]
         self,
         latents: torch.Tensor,
         num_inference_steps: int = 50,
@@ -243,7 +243,7 @@ class AudioLDM(nn.Module):
         return noisy_latents
 
     @torch.no_grad()
-    def ddim_denoising(  # ts[B,C:8,lT:256,lM:16] -> ts[B,C:8,lT:256,lM:16]
+    def ddim_denoising(  # ts[B, C:8, lT:256, lM:16] -> ts[B, C:8, lT:256, lM:16]
         self,
         latents: torch.Tensor,
         prompt_embeds: torch.Tensor,

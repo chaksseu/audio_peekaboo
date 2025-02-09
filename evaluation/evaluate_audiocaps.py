@@ -202,7 +202,7 @@ class AudioCapsEvaluator:
                     totalstep = config['ddim_steps']
                     iteration = config['iteration']
                     duration = 10.24
-                    mel, _, _, _ = pcr.read_audio_file(mixture_path)
+                    mel, _, stft_c, _, _ = pcr.read_audio_file(mixture_path)
 
                     current_mel = mel
                     for iter in range(iteration):
