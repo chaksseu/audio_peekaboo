@@ -2,7 +2,7 @@ import os
 import sys
 import re
 from typing import Dict, List
-# import traceback
+import traceback
 
 proj_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 src_dir = os.path.join(proj_dir, 'src')
@@ -80,6 +80,7 @@ def parse_yaml(config_yaml: str) -> Dict:
     with open(config_yaml, "r") as fr:
         return yaml.load(fr, Loader=yaml.FullLoader)
 
+
 class AudioCapsEvaluator:
     def __init__(self, query='caption', sampling_rate=32000) -> None:
         r"""AudioCaps evaluator.
@@ -102,179 +103,92 @@ class AudioCapsEvaluator:
         
         # pl_model.eval()
 
-        pcr, aldm = pl_model
+        processor, aldm = pl_model
         device = aldm.device
 
         sisdrs_list = []
         sdris_list = []
-        sisdrs_list_with_mix = []
-        sdris_list_with_mix = []
+        
+        try:
+            with torch.no_grad():
+                for i, eval_data in tqdm(enumerate(self.eval_list), total=len(self.eval_list)):
+                    if i == 1000:
+                        break
+                    idx, caption, labels, _, _ = eval_data
 
-        # try:
-        with torch.no_grad():
-            for i, eval_data in tqdm(enumerate(self.eval_list)):
+                    source_path = os.path.join(self.audio_dir, f'segment-{idx}.wav')
+                    mixture_path = os.path.join(self.audio_dir, f'mixture-{idx}.wav')
 
-                idx, caption, labels, _, _ = eval_data
+                    mel_src, _, stft_complex_src, wav_src, _ = processor.read_audio_file(source_path)
+                    mel_mix, _, stft_complex_mix, wav_mix, _ = processor.read_audio_file(mixture_path)
 
-                source_path = os.path.join(self.audio_dir, f'segment-{idx}.wav')
-                mixture_path = os.path.join(self.audio_dir, f'mixture-{idx}.wav')
+                    if self.query == 'caption':
+                        text = [caption]
+                    elif self.query == 'labels':
+                        text = [labels]
 
-                # source, fs = load_audio_torch(source_path, sampling_rate=self.sampling_rate, mono=True)  # np[N,]
-                # mixture, fs = load_audio_torch(mixture_path, sampling_rate=self.sampling_rate, mono=True)
+                    ts = config['transfer_strength']
+                    guid = config['guidance_scale']
+                    totalstep = config['ddim_steps']
+                    iteration = config['iteration']
+                    do_clip = config['do_clip']
+                    duration = 10.24
 
-                _, _, _, source, rand_start = pcr.read_audio_file(source_path)  # np[1,N,]
-                mixture, rand_start = pcr.read_wav_file(mixture_path)
+                    current_mel = mel_mix
+                    for iter in range(iteration):
+                        current_mel = aldm.edit_audio_with_ddim(
+                            mel=current_mel,
+                            text=str(f'Nothing but {text[0]}'),
+                            duration=duration,
+                            batch_size=1,
+                            transfer_strength=ts,
+                            guidance_scale=guid,
+                            ddim_steps=totalstep,
+                            clipping = do_clip,
+                            return_type="mel",
+                        )
 
-
-
-                logm, stft, stft_c = pcr.wav_feature_extraction(source)
-                print(logm.shape)
-                print(stft_c.shape)
-
-                source_ = pcr.inverse_mel_with_phase(logm, stft_c.squeeze(0))
-                
-                sdr = calculate_sisdr(source,source_)
-                print(sdr)
-                
-                raise ValueError
-                ########################
-                current_wav = mixture
-                for i in range(1):
-                    mixture_mel, _ = pcr.wav_feature_extraction(current_wav, pad_stft=True)
-                    edited_waveform = aldm.mel_to_waveform(mixture_mel)
-                    current_wav = edited_waveform[None, ...]
-
-                    sdr = calculate_sisdr(mixture,current_wav)
-                    print(sdr)
-                    sdr = calculate_sisdr(mixture,mixture)
-                    print(sdr)
-                
-
-                curr = current_wav.squeeze(0)
-                mix = mixture.squeeze(0)
-
-
-                import matplotlib.pyplot as plt
-                import scipy.io.wavfile as wav
-                import librosa.display as ld  
-
-                def plot_wav_mel(wav_paths, save_path="./test/waveform_mel.png"):
-                    fig, axes = plt.subplots(2, len(wav_paths), figsize=(4 * len(wav_paths), 6))
-
-                    for i, wav_path in enumerate(wav_paths):
-                        sr, data = wav.read(wav_path)
-                        time = np.linspace(0, len(data) / sr, num=len(data))
-                        
-                        # Waveform
-                        axes[0, i].plot(time, data, lw=0.5)
-                        axes[0, i].set_title(f"Waveform {i+1}")
-                        axes[0, i].set_xlabel("Time (s)")
-                        axes[0, i].set_ylabel("Amplitude")
-
-                        # Mel Spectrogram
-                        y, sr = librosa.load(wav_path, sr=None)
-                        mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
-                        mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
-                        ld.specshow(mel_spec_db, sr=sr, x_axis="time", y_axis="mel", ax=axes[1, i])
-                        axes[1, i].set_title(f"Mel Spectrogram {i+1}")
-
-                    plt.tight_layout()
-                    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-                    plt.close()
-
-                wavs = ['./test/origin.wav',
-                './test/time_align_shit.wav',
-                './test/orig.wav',
-                './test/noised.wav',]
-
-                plot_wav_mel(wavs)
-
-
-
-                raise ValueError
-                sdr = calculate_sisdr(mixture,edited_waveform)
-                print(sdr)
-
-                source = source.squeeze(0)
-                mixture = mixture.squeeze(0)
-                sdr = calculate_sisdr(mixture,mixture)
-                print(sdr)
-                sdr = calculate_sisdr(source,mixture)
-                print(sdr)
-
-
-                sdr_no_sep = calculate_sdr(ref=source, est=mixture)
-
-                if self.query == 'caption':
-                    text = [caption]
-                elif self.query == 'labels':
-                    text = [labels]
-
-                ts = config['transfer_strength']
-                guid = config['guidance_scale']
-                totalstep = config['ddim_steps']
-                iteration = config['iteration']
-                duration = 10.24
-                mel, _, stft_c, _, _ = pcr.read_audio_file(mixture_path)
-
-                current_mel = mel
-                for iter in range(iteration):
-                    waveform = aldm.edit_audio_with_ddim(
-                        mel=current_mel,
-                        text=str(f'Nothing but {text[0]}'),
-                        duration=duration,
-                        batch_size=1,
-                        transfer_strength=ts,
-                        guidance_scale=guid,
-                        ddim_steps=totalstep,
-                        clipping = False,
+                    wav_sep = processor.inverse_mel_with_phase(
+                        masked_mel_spec=current_mel,
+                        stft_complex=stft_complex_mix[:,:,:1024],
                     )
-                    waveform = waveform[None, ...]
-                    mel, _ = pcr.wav_feature_extraction(waveform, pad_stft=True)
-                    current_mel = mel
 
-                sep_segment = waveform[0, ...]
+                    wav_src = wav_src.squeeze(0).data.cpu().numpy()
+                    wav_mix = wav_mix.squeeze(0).data.cpu().numpy()
+                    wav_sep = wav_sep.squeeze(0).data.cpu().numpy()
+                    
+                    assert len(wav_sep) <= len(wav_mix), len(wav_sep)
+                    wav_src = wav_src[:len(wav_sep)]
+                    wav_mix = wav_mix[:len(wav_sep)]
+                    assert wav_src.shape == wav_mix.shape == wav_sep.shape, f"{wav_src.shape}, {wav_mix.shape}, {wav_sep.shape}"
 
-                # sep_segment = pcr.normalize_wav(sep_segment)
-                # source = pcr.normalize_wav(source)
+                    sdr_no_sep = calculate_sdr(ref=wav_src, est=wav_mix)
+                    sdr = calculate_sdr(ref=wav_src, est=wav_sep)
+                    sdri = sdr - sdr_no_sep
+                    sisdr = calculate_sisdr(ref=wav_src, est=wav_sep)
+                    
+                    sisdrs_list.append(sisdr)
+                    sdris_list.append(sdri)
+                    
+                    
+                    # print(text[0])
+                    # t = text[0]
+                    # text = re.sub(r'[\/:*?"<>| ]', '_', t)
 
-                assert sep_segment.shape == source.shape, f'{sep_segment.shape}, {source.shape}'
-                
-                print(text[0])
-                t = text[0]
-                text = re.sub(r'[\/:*?"<>| ]', '_', t)
+                    # sf.write(f'./z_result/{i}_result_{t}.wav', sep_segment, 16000)
+                    # sf.write(f'./z_result/{i}_gt_{t}.wav', source, 16000)
+                    # sf.write(f'./z_result/{i}_mixture_{t}.wav', mixture, 16000)
 
-                sf.write(f'./z_result/{i}_result_{t}.wav', sep_segment, 16000)
-                sf.write(f'./z_result/{i}_gt_{t}.wav', source, 16000)
-                sf.write(f'./z_result/{i}_mixture_{t}.wav', mixture, 16000)
 
-                sdr = calculate_sdr(ref=source, est=sep_segment)
-                sdri = sdr - sdr_no_sep
-                sisdr = calculate_sisdr(ref=source, est=sep_segment)
+        except Exception as e:
+            print(f"Error: {e}")
+            traceback.print_exc()
 
-                #####
-                sdr_no_sep_with_mix = calculate_sdr(ref=mixture, est=source)
-                sdr_with_mix = calculate_sdr(ref=mixture, est=sep_segment)
-                sdri_with_mix = sdr_with_mix - sdr_no_sep_with_mix
-                sisdr_with_mix = calculate_sisdr(ref=mixture, est=sep_segment)
-                sisdrs_list_with_mix.append(sisdr_with_mix)
-                sdris_list_with_mix.append(sdri_with_mix)
-                #####
-
-                sisdrs_list.append(sisdr)
-                sdris_list.append(sdri)
-
-        # except Exception as e:
-        #     print(f"Error: {e}")
-        #     # traceback.print_exc()
-
-        # finally:
-        #     mean_sisdr = np.mean(sisdrs_list)
-        #     mean_sdri = np.mean(sdris_list)
-        #     mean_sisdr_with_mix = np.mean(sisdrs_list_with_mix)
-        #     mean_sdri_with_mix = np.mean(sdris_list_with_mix)
+        finally:
+            mean_sisdr = np.mean(sisdrs_list)
+            mean_sdri = np.mean(sdris_list)
             
-        #     return mean_sisdr, mean_sdri, mean_sisdr_with_mix, mean_sdri_with_mix
+            return mean_sisdr, mean_sdri
 
 if __name__ == "__main__":
     def clean_wav_filenames(dir_path):
@@ -292,32 +206,52 @@ if __name__ == "__main__":
     aldm = ldm('cuda:0')
     device = aldm.device
     processor = prcssr(device=device)
-    '''
-    mel, _, _, _ = processor.read_audio_file(current_audio)
-        # AudioLDM을 사용하여 스타일 변환 수행
-        waveform = ldm.edit_audio_with_ddim(
-            mel=mel,
-            text=target_text,
-            duration=10.24,
-            batch_size=1,
-            transfer_strength=transfer_strength,
-            guidance_scale=guidance_scale,
-            ddim_steps=ddim_steps,
-            clipping = True,
-        )
-    '''
 
     config = {
-        'transfer_strength': 0,
-        'ddim_steps': 20,
-        'guidance_scale': 2.5,
-        'iteration': 1,
+        'transfer_strength': 0.4,
+        'ddim_steps': 10,
+        'guidance_scale': 5.0,
+        'iteration': 6,
+        'do_clip': False
     }
 
-    mean_sisdr, mean_sdri, with_mix_sisdr, with_mix_sdri = eval((processor, aldm), config)
+    mean_sisdr, mean_sdri = eval((processor, aldm), config)
     
     print(" SI-SDR  |  SDRi ")
     print(f"{round(mean_sisdr, 2)}  |  {round(mean_sdri, 2)}")
-    print(" With Mix SI-SDR  |  With Mix SDRi ")
-    print(f"{round(with_mix_sisdr, 2)}  |  {round(with_mix_sdri, 2)}")
-    
+
+
+    # import matplotlib.pyplot as plt
+    # import scipy.io.wavfile as wav
+    # import librosa.display as ld  
+
+    # def plot_wav_mel(wav_paths, save_path="./test/waveform_mel.png"):
+    #     fig, axes = plt.subplots(2, len(wav_paths), figsize=(4 * len(wav_paths), 6))
+
+    #     for i, wav_path in enumerate(wav_paths):
+    #         sr, data = wav.read(wav_path)
+    #         time = np.linspace(0, len(data) / sr, num=len(data))
+            
+    #         # Waveform
+    #         axes[0, i].plot(time, data, lw=0.5)
+    #         axes[0, i].set_title(f"Waveform {i+1}")
+    #         axes[0, i].set_xlabel("Time (s)")
+    #         axes[0, i].set_ylabel("Amplitude")
+
+    #         # Mel Spectrogram
+    #         y, sr = librosa.load(wav_path, sr=None)
+    #         mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+    #         mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+    #         ld.specshow(mel_spec_db, sr=sr, x_axis="time", y_axis="mel", ax=axes[1, i])
+    #         axes[1, i].set_title(f"Mel Spectrogram {i+1}")
+
+    #     plt.tight_layout()
+    #     plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    #     plt.close()
+
+    # wavs = ['./test/origin.wav',
+    #         './test/time_align_shit.wav',
+    #         './test/orig.wav',
+    #         './test/noised.wav',]
+
+    # plot_wav_mel(wavs)

@@ -28,10 +28,7 @@ class AudioDataProcessor():
         self.waveform_only = False
         self.do_random_segment = False
 
-        self.melbins = 64     # 중복
-        self.sampling_rate = 16000  # 중복
-        self.hopsize = 160    # 중복
-        # self.duration = 10.24
+        self.sampling_rate = 16000
         self.duration = 10.24
         self.target_length = 1024
         self.mixup = 0.0
@@ -40,15 +37,15 @@ class AudioDataProcessor():
         self.hann_window = {}
 
         # DSP: s-full 기준 (audioldm_original.yaml)
-        self.filter_length = 1024
+        self.filter_length = 1024  # n_fft
         self.hop_length = 160
         self.win_length = 1024
-        self.n_mel = 64
+        self.n_mel = 64  # M: 64
         self.mel_fmin = 0
         self.mel_fmax = 8000
 
-        self.n_freq = self.filter_length // 2 + 1  # 513
-        self.sample_length = self.sampling_rate * self.duration  # 163840
+        self.n_freq = self.filter_length // 2 + 1  # F: 513
+        self.sample_length = self.sampling_rate * self.duration  # N: 163840
         self.pad_size = int((self.filter_length - self.hop_length) / 2)  # (1024-160)/2 = 432
         self.n_times = int(((self.sample_length + 2 * self.pad_size) - self.win_length) // self.hop_length +1)  # 123
 
@@ -112,7 +109,7 @@ class AudioDataProcessor():
         padded_wav[:, start_pos:start_pos + waveform_length] = waveform
         return padded_wav
 
-    def read_wav_file(self, filename):  # audiofile 전처리 -> [B,N]
+    def read_wav_file(self, filename):  # audiofile > mono ch > resample > norm > pad > norm => np[1, N:163840]
         # 1. 파일 로드
         waveform, original_sr = torchaudio.load(filename, normalize=True)  # ts[C,original_samples]
         waveform = waveform.mean(dim=0) if waveform.shape[0] > 1 else waveform  # mono 변환 / ts[B,N]
@@ -122,102 +119,86 @@ class AudioDataProcessor():
         if self.do_random_segment:
             waveform, random_start = self.random_segment_wav(waveform, target_samples)
         # 3. resampling (설정한 sr에 맞게 변환)
-        waveform = torchaudio.functional.resample(waveform, original_sr, self.sampling_rate)  # ts[B,target_samples]
+        waveform = torchaudio.functional.resample(waveform, original_sr, self.sampling_rate)  # ts[1,target_samples]
         # 4. 전처리 단계
         waveform = waveform.numpy()[0, ...]  # numpy 변환 & 1st channel 선택 / np[target_samples,]
         waveform = self.normalize_wav(waveform)  # centering & Norm [-0.5,0.5]
         if self.do_trim_wav:
             waveform = self.trim_wav_(waveform)  # 무음 구간 제거
         # 5. 최종 형태로 변환
-        waveform = waveform[None, ...]  # channel dim 추가 / np[B,target_samples]
+        waveform = waveform[None, ...]  # channel dim 추가 / np[1,target_samples]
         target_length = int(self.sampling_rate * self.duration)  # 최종 target samples 길이
         waveform = self.pad_wav(waveform, target_length)  # padding if wav is short
         waveform = self.normalize_wav(waveform)  #! github main code에서는 한번 더 Norm 했음
-        return waveform, random_start  # np[B,target_samples], int
+        return waveform, random_start  # np[1,target_samples], int
 
     # --------------------------------------------------------------------------------------------- #
 
-    def waveform_to_stft(self, waveform):  # [B,N] → [B,F,T]
-        # waveform: ts[C,samples] = [C,163840] in [-1,1]
+    def waveform_to_stft_to_mel(self, waveform, do_stft_pad=False,):  # [1, N:163840] → [1, F:513, T:1024]
+        
         assert torch.min(waveform) >= -1, f"train min value is {torch.min(waveform)}"
         assert torch.max(waveform) <= 1, f"train min value is {torch.max(waveform)}"
 
         if self.mel_fmax not in self.mel_basis:
-            mel_filterbank = librosa_mel_fn(
+            mel_filterbank = librosa_mel_fn(  # np[M:64, F:513]
                 sr=self.sampling_rate,
                 n_fft=self.filter_length,
                 n_mels=self.n_mel,
                 fmin=self.mel_fmin,
-                fmax=self.mel_fmax,)  # np[n_mel, n_freq=n_fft//2+1] = [64,513]
+                fmax=self.mel_fmax,)
             
             self.mel_basis[f"{self.mel_fmax}_{self.device}"] = torch.from_numpy(mel_filterbank).float().to(self.device)  # ts[n_mel, n_freq=n_fft//2+1]
-            self.hann_window[f"{self.device}"] = torch.hann_window(self.win_length,
-    periodic=True,
-    dtype=torch.float32).to(waveform.device)  # ts[win_length,] = [1024,]
+            self.hann_window[f"{self.device}"] = torch.hann_window(self.win_length).to(waveform.device)  # ts[win_length,] = [1024,]
 
+        # ========== wav -> stft ==========
         pad_size = int((self.filter_length - self.hop_length) / 2)  # (1024-160)/2 = 432
-        # waveform: [C, samples] → [C, 1, samples] → [C, 1, samples + 2*pad_size] → [C, samples + 2*pad_size] = ts[C,164704]
+        # waveform: np[C, samples] → [C, 1, samples] → [C, 1, samples + 2*pad_size] → [C, samples + 2*pad_size] = ts[C, 164704]
         waveform = torch.nn.functional.pad(waveform.unsqueeze(1), (pad_size, pad_size), mode="reflect").squeeze(1)
 
-        stft_complex = torch.stft(
-            waveform,
-            self.filter_length,
+        stft_complex = torch.stft(  # ts[1, F:513, T:1024~30] (complex)
+            waveform,                   # F = filter_length // 2 + 1 (onesided=True) = 513
+            self.filter_length,         # T = ((samples + 2*pad_size) - win_length) // hop_length + 1 = 1024
             hop_length=self.hop_length,
             win_length=self.win_length,
             window=self.hann_window[f"{self.device}"],
-            # center=False,
             pad_mode="reflect",
             normalized=False,
             onesided=True,
             return_complex=True,
-        )  # [C, n_freq, n_time] (complex) = ts[1,513,1024]
-        # n_freq = filter_length // 2 + 1 (onesided=True) = 513
-        # n_time = ((samples + 2*pad_size) - win_length) // hop_length + 1 = 1024
-
-        stft_mag = torch.abs(stft_complex)  # ts[1,513,1024]
-        assert stft_complex.shape == stft_mag.shape == (1,513,1024)
-        return stft_mag, stft_complex  # [C,freq,t]
-    
-    def stft_to_mel(self, stft):  # [B,F,T] → [B,M,T]
-        if len(stft.shape) != 3:
-            stft = self.reversing_stft(stft)
-        assert stft.shape[-2:] == torch.Size([self.n_freq, self.n_times]), f"{stft.shape[-2:]}{self.n_freq}{self.n_times}"
+        )
+        stft_mag = torch.abs(stft_complex)  # ts[1, F:513, T:1024~30]
         
-        mel_filterbank = self.mel_basis[f"{self.mel_fmax}_{self.device}"]  # ts[64,513]
-        # [n_mel, n_freq] x [C, n_freq, n_time] → [C, n_mel, n_time] = [C,64,1024]
-        stft = stft.to(self.device)
-        mel_spec = spectral_normalize_torch(torch.matmul(mel_filterbank, stft))
+        assert stft_complex.shape == stft_mag.shape
+        assert stft_mag.shape[1] == self.n_freq, f"{stft_mag.shape}, {self.n_freq}, {self.n_times}"
 
-        return mel_spec  # [C,mel,t]
+        # ========== stft -> mel ==========
+        mel_filterbank = self.mel_basis[f"{self.mel_fmax}_{self.device}"]  # ts[M:64, F:513]
+        # [M:64, F:513] x [1, F:513, T:1024~] → [1, M:64, T:1024~]
+        stft_mag = stft_mag.to(self.device)  # ts[1, F:513, T:1024~]
+        mel_spec = spectral_normalize_torch(torch.matmul(mel_filterbank, stft_mag))  # ts[1, M:64, T:1024~]
+
+        assert mel_spec.shape[1] == self.n_mel and stft_mag.shape[1] == stft_complex.shape[1] == self.n_freq, f"{mel_spec.shape}, {stft_mag.shape}, {stft_complex.shape}"
+        return mel_spec, stft_mag, stft_complex  # ts[1, M:64, T:1024~] / ts[1, F:513, T:1024~] / ts[1, F:513, T:1024~]
     
-    def waveform_to_mel_n_stft(self, waveform):  # ts[B,N] → logmel: [B,mel,t] / stft: [B,freq,t]
-        "process: waveform → STFT → mel 변환 → normalize"
-        stft_mag, stft_c = self.waveform_to_stft(waveform)  # ts[C, n_freq, n_time] = [1,513,1024]
-        mel_spec = self.stft_to_mel(stft_mag)  # ts[C,n_mel,n_time] = [1,64,1024]
-
-        return mel_spec, stft_mag, stft_c
-
-    def pad_spec(self, spectrogram):  # [t,-] → [t,*]
+    def pad_spec(self, spectrogram):  # [T, ~] → [T*, ~*]
         n_frames = spectrogram.shape[0]
         p = self.target_length - n_frames
         # cut and pad
         if p > 0:
             m = torch.nn.ZeroPad2d((0, 0, 0, p))
-            spectrogram = m(spectrogram)
+            spectrogram = m(spectrogram)  # [T*, ~] 뒷 시간 늘림
         elif p < 0:
-            spectrogram = spectrogram[0 : self.target_length, :]
-
+            spectrogram = spectrogram[0 : self.target_length, :]  # [T*, ~] 뒷 시간 줄임
         if spectrogram.size(-1) % 2 != 0:
-            spectrogram = spectrogram[..., :-1]
+            spectrogram = spectrogram[..., :-1]  # ~ 가 odd면, -1
+        return spectrogram, p
 
-        return spectrogram
-
-    def postprocess_spec(self, spectrogram, do_pad=True):  # [C,-,t]
-        spec = spectrogram[0]  # [-,t]
-        spec = spec.T.float()  # [t,-]
+    def postprocess_spec(self, spectrogram, do_pad=True):  # [1, ~, T] -> [T*, ~*]
+        spec = spectrogram[0]  # [~, T]
+        spec = spec.T.float()  # [T, ~]
         if do_pad:
-            spec = self.pad_spec(spec)  # [t,*]
-        return spec
+            spec, p = self.pad_spec(spec)  # [T*, ~*]
+        return spec, p
 
     def reversing_stft(self, stft):
         if len(stft.shape) == 3:
@@ -227,14 +208,14 @@ class AudioDataProcessor():
         stft = stft.unsqueeze(0)
         return stft
 
-    def wav_feature_extraction(self, waveform, pad_stft=False):  # wav: np[C,N] → logmel: [t,mel] / stft: [t,freq]
+    def wav_feature_extraction(self, waveform, pad_stft=False):  # wav: np[C,N] → logmel: ts[1,1,T,M] / stft: ts[1,1,T,F]
         waveform = waveform[0, ...]  # 다채널 방지 / np[samples,] = (163840,)
         waveform = torch.FloatTensor(waveform).unsqueeze(0).to(self.device)  # ts[1, samples]
-        log_mel_spec, stft, stft_c = self.waveform_to_mel_n_stft(waveform)  # [C,mel,t] / [C,freq,t]
-        log_mel_spec = self.postprocess_spec(log_mel_spec)  # [t,mel]
-        stft = self.postprocess_spec(stft, do_pad=pad_stft)  # [t,freq]
+        log_mel_spec, stft, stft_c = self.waveform_to_stft_to_mel(waveform)  # ts[1, M:64, T:1024~] / ts[1, F:513, T:1024~] / ts[1, F:513, T:1024~]
+        log_mel_spec, p = self.postprocess_spec(log_mel_spec)  # ts[T:1024, M:64]
+        stft, p = self.postprocess_spec(stft, do_pad=pad_stft)  # ts[T:1024, F:512]
 
-        return log_mel_spec.unsqueeze(0), stft.unsqueeze(0), stft_c.unsqueeze(0)  # [1,t,mel], [1,t,freq]
+        return log_mel_spec[None, None, ...], stft[None, None, ...], stft_c  # ts[1,1,T,M] / ts[1,1,T,F] / ts[1, F:513, T:1024~]
 
     # --------------------------------------------------------------------------------------------- #
 
@@ -250,7 +231,7 @@ class AudioDataProcessor():
 
         # 2. 특성 추출 (stft spec, log mel spec)
         log_mel_spec, stft, stft_c = (None, None, None) if self.waveform_only else self.wav_feature_extraction(waveform, pad_stft=True)  # input: [1,N]
-        return log_mel_spec, stft, stft_c, waveform, random_start  # ts[1,t,mel], ts[1,t,freq], ts[1,samples]
+        return log_mel_spec, stft, stft_c, waveform, random_start  # ts[1,1,T,M] / ts[1,1,T,F] / ts[1, F:513, T:1024~] / ts[1,N]
 
     # --------------------------------------------------------------------------------------------- #
 
@@ -273,19 +254,21 @@ class AudioDataProcessor():
         # 1) mel_spec (log scale) → linear scale로 변환
         #    forward에서 spectral_normalize_torch = log(clip(mag)*C) 사용했으므로
         #    여기서는 exp()로 복원 (C=1 가정)
-        masked_mel_linear = torch.exp(masked_mel_spec)  # shape [B, T, n_mel]
+        assert masked_mel_spec.shape == (1,1,1024,64)
+        masked_mel_spec = masked_mel_spec.squeeze(0)
+        masked_mel_linear = torch.exp(masked_mel_spec)  # shape [1, T, M]
 
         # 2) mel → STFT magnitude로 근사 복원
         #    mel_filterbank shape이 [n_mel, n_freq]이므로 pseudo-inverse를 구함
         #    (n_mel=64 << n_freq=513 이라 완벽 역변환은 불가)
         if not mel_filterbank:
             mel_filterbank = self.mel_basis[f"{self.mel_fmax}_{self.device}"]
-            inv_mel_filter = torch.pinverse(mel_filterbank)  # shape [n_freq, n_mel]
+            inv_mel_filter = torch.pinverse(mel_filterbank)  # shape [F, M]
 
         # 현재 masked_mel_linear: [B, T, n_mel] → [B, n_mel, T] 로 transpose
-        masked_mel_linear = masked_mel_linear.permute(0, 2, 1)  # shape [B, n_mel, T]
+        masked_mel_linear = masked_mel_linear.permute(0, 2, 1)  # shape [B, M, T]
 
-        # pseudo-inverse 곱: [n_freq, n_mel] x [n_mel, T] = [n_freq, T]
+        # pseudo-inverse 곱: [F, M] x [M, T] = [F, T]
         # 배치처리까지 고려하려면 map으로 처리
         batch_size = masked_mel_linear.shape[0]
         masked_stft_mag = []
@@ -293,31 +276,25 @@ class AudioDataProcessor():
             # shape [n_mel, T] → [n_freq, T]
             mag_i = inv_mel_filter @ masked_mel_linear[i]
             masked_stft_mag.append(mag_i.unsqueeze(0))
-        masked_stft_mag = torch.cat(masked_stft_mag, dim=0)  # shape [B, n_freq, T]
+        masked_stft_mag = torch.cat(masked_stft_mag, dim=0)  # shape [B, F, T]
 
         # 3) 원본 stft_complex의 phase 추출 후, magnitude와 결합
         #    phase = stft_complex / (|stft_complex| + eps)
         phase = stft_complex / (stft_complex.abs() + eps)
-        masked_stft_complex = masked_stft_mag * phase  # shape 동일: [B, n_freq, T]
+        masked_stft_complex = masked_stft_mag * phase  # shape 동일: [B, F, T]
 
         # 4) iSTFT 수행 (forward와 동일 파라미터)
         #    center=False이므로, forward 시 (pad_size, pad_size) reflect padding 했었음.
         #    여기서도 그대로 동일 파라미터 유지
         if not hann_window:
             hann_window = self.hann_window[f"{self.device}"]
-        hann_window = torch.hann_window(1024).to(self.device)
 
-        print(masked_stft_complex.shape==(1,513,1024))
-        print(masked_stft_complex.dtype)
-        print(hann_window.shape==torch.Size([1024,]))
-        print(hann_window.dtype)
         estimated_wav = torch.istft(
             masked_stft_complex.to(self.device),
             n_fft=self.filter_length,
             hop_length=self.hop_length,
             win_length=self.win_length,
             window=hann_window,
-            # center=False,
             normalized=False,
             onesided=True
         )  # shape [B, samples + 2*pad_size]

@@ -233,13 +233,18 @@ class AudioLDM(nn.Module):
 
         noisy_latents = latents.clone()
 
-        # forward로 t=0 -> t=1 ... -> t=T 방향으로 노이즈 주입
-        for i, t in enumerate(reversed(used_timesteps)):
-            noise = torch.randn_like(noisy_latents)
-            noisy_latents = self.scheduler.add_noise(noisy_latents, noise, t)
+        # # forward로 t=0 -> t=1 ... -> t=T 방향으로 노이즈 주입
+        # for i, t in enumerate(reversed(used_timesteps)):
+        #     noise = torch.randn_like(noisy_latents)
+        #     noisy_latents = self.scheduler.add_noise(noisy_latents, noise, t)
 
         self.scheduler.config.steps_offset = old_offset
         
+        ##
+        noise = torch.randn_like(noisy_latents)
+        noisy_latents = self.scheduler.add_noise(noisy_latents, noise, all_timesteps[-t_enc])
+        ##
+
         return noisy_latents
 
     @torch.no_grad()
@@ -307,7 +312,7 @@ class AudioLDM(nn.Module):
 
         return latents
 
-    def edit_audio_with_ddim(
+    def edit_audio_with_ddim(  # ts[B, 1, T:1024, M:64] -> mel/wav
         self,
         mel: torch.Tensor,
         text: Union[str, List[str]],
@@ -316,7 +321,7 @@ class AudioLDM(nn.Module):
         transfer_strength: float,
         guidance_scale: float,
         ddim_steps: int,
-        return_type: str = "ts",  # "ts" or "np"
+        return_type: str = "ts",  # "ts" or "np" or "mel"
         clipping = False,
     ):
         
@@ -326,8 +331,8 @@ class AudioLDM(nn.Module):
         # assert get_bit_depth(original_audio_file_path) == 16, \
         #     f"원본 오디오 {original_audio_file_path}의 bit depth는 16이어야 함"
 
-        if duration > self.audio_file_duration:
-            print(f"Warning: 지정한 duration {duration}s가 원본 오디오 길이 {self.audio_file_duration}s보다 큼")
+        if duration > self.audio_duration:
+            print(f"Warning: 지정한 duration {duration}s가 원본 오디오 길이 {self.audio_duration}s보다 큼")
             # round_up_duration(audio_file_duration)
             # print(f"duration을 {duration}s로 조정")
 
@@ -368,6 +373,10 @@ class AudioLDM(nn.Module):
         # mel clipping은 선택
         if clipping:
             mel_spectrogram = torch.maximum(torch.minimum(mel_spectrogram, mel), mel)
+
+        if return_type == "mel":
+            assert mel_spectrogram.shape[-2:] == (1024,64)
+            return mel_spectrogram
 
         # waveform 변환
         edited_waveform = self.mel_to_waveform(mel_spectrogram)
