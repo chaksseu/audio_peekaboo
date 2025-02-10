@@ -151,7 +151,9 @@ class AudioDataProcessor():
                 fmax=self.mel_fmax,)  # np[n_mel, n_freq=n_fft//2+1] = [64,513]
             
             self.mel_basis[f"{self.mel_fmax}_{self.device}"] = torch.from_numpy(mel_filterbank).float().to(self.device)  # ts[n_mel, n_freq=n_fft//2+1]
-            self.hann_window[f"{self.device}"] = torch.hann_window(self.win_length).to(waveform.device)  # ts[win_length,] = [1024,]
+            self.hann_window[f"{self.device}"] = torch.hann_window(self.win_length,
+    periodic=True,
+    dtype=torch.float32).to(waveform.device)  # ts[win_length,] = [1024,]
 
         pad_size = int((self.filter_length - self.hop_length) / 2)  # (1024-160)/2 = 432
         # waveform: [C, samples] → [C, 1, samples] → [C, 1, samples + 2*pad_size] → [C, samples + 2*pad_size] = ts[C,164704]
@@ -163,7 +165,7 @@ class AudioDataProcessor():
             hop_length=self.hop_length,
             win_length=self.win_length,
             window=self.hann_window[f"{self.device}"],
-            center=False,
+            # center=False,
             pad_mode="reflect",
             normalized=False,
             onesided=True,
@@ -301,13 +303,21 @@ class AudioDataProcessor():
         # 4) iSTFT 수행 (forward와 동일 파라미터)
         #    center=False이므로, forward 시 (pad_size, pad_size) reflect padding 했었음.
         #    여기서도 그대로 동일 파라미터 유지
+        if not hann_window:
+            hann_window = self.hann_window[f"{self.device}"]
+        hann_window = torch.hann_window(1024).to(self.device)
+
+        print(masked_stft_complex.shape==(1,513,1024))
+        print(masked_stft_complex.dtype)
+        print(hann_window.shape==torch.Size([1024,]))
+        print(hann_window.dtype)
         estimated_wav = torch.istft(
-            masked_stft_complex,
-            n_fft=filter_length,
-            hop_length=hop_length,
-            win_length=win_length,
+            masked_stft_complex.to(self.device),
+            n_fft=self.filter_length,
+            hop_length=self.hop_length,
+            win_length=self.win_length,
             window=hann_window,
-            center=False,
+            # center=False,
             normalized=False,
             onesided=True
         )  # shape [B, samples + 2*pad_size]
