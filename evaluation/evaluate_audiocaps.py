@@ -170,14 +170,14 @@ class AudioCapsEvaluator:
                     sisdrs_list.append(sisdr)
                     sdris_list.append(sdri)
                     
-                    
-                    # print(text[0])
-                    # t = text[0]
-                    # text = re.sub(r'[\/:*?"<>| ]', '_', t)
+                    if i % 3 == 0:
+                        print(text[0])
+                        t = text[0]
+                        text = re.sub(r'[\/:*?"<>| ]', '_', t)
 
-                    # sf.write(f'./z_result/{i}_result_{t}.wav', sep_segment, 16000)
-                    # sf.write(f'./z_result/{i}_gt_{t}.wav', source, 16000)
-                    # sf.write(f'./z_result/{i}_mixture_{t}.wav', mixture, 16000)
+                        sf.write(f'./z_result/{i}_result_{t}.wav', wav_sep, 16000)
+                        sf.write(f'./z_result/{i}_gt_{t}.wav', wav_src, 16000)
+                        sf.write(f'./z_result/{i}_mixture_{t}.wav', wav_mix, 16000)
 
 
         except Exception as e:
@@ -208,10 +208,10 @@ if __name__ == "__main__":
     processor = prcssr(device=device)
 
     config = {
-        'transfer_strength': 0.4,
-        'ddim_steps': 10,
-        'guidance_scale': 5.0,
-        'iteration': 6,
+        'transfer_strength': 0.2,
+        'ddim_steps': 200,
+        'guidance_scale': 2.5,
+        'iteration': 1,
         'do_clip': False
     }
 
