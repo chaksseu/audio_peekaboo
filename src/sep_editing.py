@@ -49,20 +49,28 @@ if __name__ == "__main__":
     device = aldm.device
     processor = prcssr(device=device)
 
-    # setting
-    initial_audio_path = "./a_cat_n_stepping_wood.wav"
-    # name = 'A_cat_meowing'
-    name = "A_cat_meowing"
-    target_text = name.replace('_',' ')
-    print(target_text)
-    # target_text = "A cat meowing"
+    set1 = processor.making_dataset('./samples/best_samples/A_cat_meowing.wav')
+    set2 = processor.making_dataset('./samples/best_samples/Footsteps_on_a_wooden_floor.wav')
 
-    iterative_audio_transform(
-        ldm=aldm, processor=processor,
-        initial_audio=initial_audio_path,
-        target_text=target_text,
-        ddim_steps=25,
-        transfer_strength=0.15,
-        num_iterations=10,
-        guidance_scale=2.5,
-        )
+    mixed_wav = processor.get_mixed_sets(set1, set2, snr_db=0)
+    mixed_wav = mixed_wav.squeeze(0).squeeze(0)
+    sf.write('./a_cat_n_stepping_wood.wav', mixed_wav, 16000)
+
+
+    # # setting
+    # initial_audio_path = "./a_cat_n_stepping_wood.wav"
+    # # name = 'A_cat_meowing'
+    # name = "A_cat_meowing"
+    # target_text = name.replace('_',' ')
+    # print(target_text)
+    # # target_text = "A cat meowing"
+
+    # iterative_audio_transform(
+    #     ldm=aldm, processor=processor,
+    #     initial_audio=initial_audio_path,
+    #     target_text=target_text,
+    #     ddim_steps=25,
+    #     transfer_strength=0.15,
+    #     num_iterations=10,
+    #     guidance_scale=2.5,
+    #     )

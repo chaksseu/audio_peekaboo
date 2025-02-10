@@ -175,7 +175,7 @@ class AudioDataProcessor():
         # n_time = ((samples + 2*pad_size) - win_length) // hop_length + 1 = 1024
 
         stft_mag = torch.abs(stft_complex)  # ts[1,513,1024]
-        
+        assert stft_complex.shape == stft_mag.shape == (1,513,1024)
         return stft_mag, stft_complex  # [C,freq,t]
     
     def stft_to_mel(self, stft):  # [B,F,T] → [B,M,T]
@@ -359,8 +359,8 @@ class AudioDataProcessor():
                 data[key] = value.unsqueeze(0)
 
         assert data["waveform"].shape == torch.Size([1, 1, 163840]), data["waveform"].shape
-        assert data["stft"].shape[:-1] == torch.Size([1, 1024]), data["stft"].shape
-        assert data["log_mel_spec"].shape == torch.Size([1, 1024, 64]), data["log_mel_spec"].shape
+        assert data["stft"].shape == torch.Size([1, 1, 1024, 512]), data["stft"].shape
+        assert data["log_mel_spec"].shape == torch.Size([1, 1, 1024, 64]), data["log_mel_spec"].shape
         return data
 
     def get_mixed_sets(self, set1, set2, snr_db=0):
@@ -374,22 +374,23 @@ class AudioDataProcessor():
         if max_abs > 1:
             mixed /= max_abs
         mixed_wav = (mixed * 0.5).float().squeeze(0)  # ts[1,1,samples]
+        return mixed_wav
 
-        log_mel_spec, stft, c = self.waveform_to_mel_n_stft(mixed_wav)
-        log_mel_spec = self.postprocess_spec(log_mel_spec).unsqueeze(0).float()  # [1,t,mel]
-        stft = self.postprocess_spec(stft, do_pad=False).unsqueeze(0).float()  # [1,t,freq]
-        def set_dict(batch):
-            return {
-                "text": batch["text"],                        # List, [1]
-                "fname": batch["fname"],                      # List, [1]
-                "waveform": mixed_wav.unsqueeze(0).to(self.device),        # Tensor, [1, 1, samples_num]
-                "stft": stft.to(self.device),                 # Tensor, [1, t-steps, f-bins]
-                "log_mel_spec": log_mel_spec.to(self.device), # Tensor, [1, t-steps, mel-bins]
-            }
-        mixed_set1 = set_dict(set1)
-        mixed_set2 = set_dict(set2)
-        assert mixed_set1["waveform"].shape == torch.Size([1, 1, 163840]), mixed_set1["waveform"].shape
-        assert mixed_set1["stft"].shape[:-1] == torch.Size([1, 1024]), mixed_set1["stft"].shape
-        assert mixed_set1["log_mel_spec"].shape == torch.Size([1, 1024, 64]), mixed_set1["log_mel_spec"].shape
+        # log_mel_spec, stft, c = self.waveform_to_mel_n_stft(mixed_wav)
+        # log_mel_spec = self.postprocess_spec(log_mel_spec).unsqueeze(0).float()  # [1,t,mel]
+        # stft = self.postprocess_spec(stft, do_pad=False).unsqueeze(0).float()  # [1,t,freq]
+        # def set_dict(batch):
+        #     return {
+        #         "text": batch["text"],                        # List, [1]
+        #         "fname": batch["fname"],                      # List, [1]
+        #         "waveform": mixed_wav.unsqueeze(0).to(self.device),        # Tensor, [1, 1, samples_num]
+        #         "stft": stft.to(self.device),                 # Tensor, [1, t-steps, f-bins]
+        #         "log_mel_spec": log_mel_spec.to(self.device), # Tensor, [1, t-steps, mel-bins]
+        #     }
+        # mixed_set1 = set_dict(set1)
+        # mixed_set2 = set_dict(set2)
+        # assert mixed_set1["waveform"].shape == torch.Size([1, 1, 163840]), mixed_set1["waveform"].shape
+        # assert mixed_set1["stft"].shape[:-1] == torch.Size([1, 1, 1024, 512]), mixed_set1["stft"].shape
+        # assert mixed_set1["log_mel_spec"].shape == torch.Size([1, 1, 1024, 64]), mixed_set1["log_mel_spec"].shape
 
-        return (mixed_set1, mixed_set2)
+        # return (mixed_set1, mixed_set2)

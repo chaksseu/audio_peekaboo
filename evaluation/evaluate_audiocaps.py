@@ -16,6 +16,7 @@ from tqdm import tqdm
 import pathlib
 import librosa
 import yaml
+os.environ["HF_HOME"] = os.path.expanduser("~/.cache/huggingface")
 # import lightning.pytorch as pl
 # from models.clap_encoder import CLAP_Encoder
 
