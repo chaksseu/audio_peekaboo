@@ -109,10 +109,12 @@ class AudioCapsEvaluator:
         sisdrs_list = []
         sdris_list = []
         
+        whentobreak = config['break']
+
         try:
             with torch.no_grad():
                 for i, eval_data in tqdm(enumerate(self.eval_list), total=len(self.eval_list)):
-                    if i == 1000:
+                    if i == whentobreak:
                         break
                     idx, caption, labels, _, _ = eval_data
 
@@ -132,35 +134,56 @@ class AudioCapsEvaluator:
                     totalstep = config['ddim_steps']
                     iteration = config['iteration']
                     do_clip = config['do_clip']
+                    iSTFT = config['iSTFT']
                     duration = 10.24
 
-                    current_mel = mel_mix
-                    for iter in range(iteration):
-                        current_mel = aldm.edit_audio_with_ddim(
-                            mel=current_mel,
-                            text=str(f'Nothing but {text[0]}'),
-                            duration=duration,
-                            batch_size=1,
-                            transfer_strength=ts,
-                            guidance_scale=guid,
-                            ddim_steps=totalstep,
-                            clipping = do_clip,
-                            return_type="mel",
+                    if iSTFT:
+                        current_mel = mel_mix
+                        for iter in range(iteration):
+                            current_mel = aldm.edit_audio_with_ddim(
+                                mel=current_mel,
+                                text=str(f'Nothing but {text[0]}'),
+                                duration=duration,
+                                batch_size=1,
+                                transfer_strength=ts,
+                                guidance_scale=guid,
+                                ddim_steps=totalstep,
+                                clipping = do_clip,
+                                return_type="mel",
+                            )
+
+                        wav_sep = processor.inverse_mel_with_phase(
+                            masked_mel_spec=current_mel,
+                            stft_complex=stft_complex_mix[:,:,:1024],
                         )
 
-                    wav_sep = processor.inverse_mel_with_phase(
-                        masked_mel_spec=current_mel,
-                        stft_complex=stft_complex_mix[:,:,:1024],
-                    )
+                        wav_src = wav_src.squeeze(0).data.cpu().numpy()
+                        wav_mix = wav_mix.squeeze(0).data.cpu().numpy()
+                        wav_sep = wav_sep.squeeze(0).data.cpu().numpy()
+                        
+                        assert len(wav_sep) <= len(wav_mix), len(wav_sep)
+                        wav_src = wav_src[:len(wav_sep)]
+                        wav_mix = wav_mix[:len(wav_sep)]
+                        assert wav_src.shape == wav_mix.shape == wav_sep.shape, f"{wav_src.shape}, {wav_mix.shape}, {wav_sep.shape}"
 
-                    wav_src = wav_src.squeeze(0).data.cpu().numpy()
-                    wav_mix = wav_mix.squeeze(0).data.cpu().numpy()
-                    wav_sep = wav_sep.squeeze(0).data.cpu().numpy()
-                    
-                    assert len(wav_sep) <= len(wav_mix), len(wav_sep)
-                    wav_src = wav_src[:len(wav_sep)]
-                    wav_mix = wav_mix[:len(wav_sep)]
-                    assert wav_src.shape == wav_mix.shape == wav_sep.shape, f"{wav_src.shape}, {wav_mix.shape}, {wav_sep.shape}"
+                    else:
+                        current_mel = mel_mix
+                        for iter in range(iteration):
+                            last_waveform = aldm.edit_audio_with_ddim(
+                                mel=current_mel,
+                                text=str(f'Nothing but {text[0]}'),
+                                duration=duration,
+                                batch_size=1,
+                                transfer_strength=ts,
+                                guidance_scale=guid,
+                                ddim_steps=totalstep,
+                                clipping = do_clip,
+                                return_type="np",
+                            )
+                            last_waveform = torch.FloatTensor(waveform)
+                            mel, stft, stft_com = processor.wav_feature_extraction(waveform)
+                            current_mel = mel
+                        wav_sep = last_waveform
 
                     sdr_no_sep = calculate_sdr(ref=wav_src, est=wav_mix)
                     sdr = calculate_sdr(ref=wav_src, est=wav_sep)
@@ -170,7 +193,7 @@ class AudioCapsEvaluator:
                     sisdrs_list.append(sisdr)
                     sdris_list.append(sdri)
                     
-                    if i % 3 == 0:
+                    if i == 0:
                         print(text[0])
                         t = text[0]
                         text = re.sub(r'[\/:*?"<>| ]', '_', t)
@@ -208,17 +231,50 @@ if __name__ == "__main__":
     processor = prcssr(device=device)
 
     config = {
-        'transfer_strength': 0.2,
+        'transfer_strength': 0.7,
         'ddim_steps': 200,
         'guidance_scale': 2.5,
         'iteration': 1,
-        'do_clip': False
+        'do_clip': False,
+        'iSTFT': True,
+        'break': 30,
     }
 
     mean_sisdr, mean_sdri = eval((processor, aldm), config)
     
     print(" SI-SDR  |  SDRi ")
     print(f"{round(mean_sisdr, 2)}  |  {round(mean_sdri, 2)}")
+
+
+    # config = {
+    #     'transfer_strength': 0.2,
+    #     'ddim_steps': 200,
+    #     'guidance_scale': 2.5,
+    #     'iteration': 1,
+    #     'do_clip': False,
+    #     'iSTFT': True,
+    #     'break': 30,
+    # }
+
+    # mean_sisdr, mean_sdri = eval((processor, aldm), config)
+    
+    # print(" SI-SDR  |  SDRi ")
+    # print(f"{round(mean_sisdr, 2)}  |  {round(mean_sdri, 2)}")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
     # import matplotlib.pyplot as plt
