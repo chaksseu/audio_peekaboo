@@ -134,7 +134,7 @@ class AudioDataProcessor():
 
     # --------------------------------------------------------------------------------------------- #
 
-    def waveform_to_stft_to_mel(self, waveform, do_stft_pad=False,):  # [1, N:163840] → [1, F:513, T:1024]
+    def waveform_to_stft(self, waveform):  # [1, N:163840] → [1, F:513, T:1024]
         
         assert torch.min(waveform) >= -1, f"train min value is {torch.min(waveform)}"
         assert torch.max(waveform) <= 1, f"train min value is {torch.max(waveform)}"
@@ -170,7 +170,9 @@ class AudioDataProcessor():
         
         assert stft_complex.shape == stft_mag.shape
         assert stft_mag.shape[1] == self.n_freq, f"{stft_mag.shape}, {self.n_freq}, {self.n_times}"
-
+        return stft_mag, stft_complex
+    
+    def stft_to_mel(self, stft_mag, stft_complex):
         # ========== stft -> mel ==========
         mel_filterbank = self.mel_basis[f"{self.mel_fmax}_{self.device}"]  # ts[M:64, F:513]
         # [M:64, F:513] x [1, F:513, T:1024~] → [1, M:64, T:1024~]
@@ -180,7 +182,7 @@ class AudioDataProcessor():
         assert mel_spec.shape[1] == self.n_mel and stft_mag.shape[1] == stft_complex.shape[1] == self.n_freq, f"{mel_spec.shape}, {stft_mag.shape}, {stft_complex.shape}"
         return mel_spec, stft_mag, stft_complex  # ts[1, M:64, T:1024~] / ts[1, F:513, T:1024~] / ts[1, F:513, T:1024~]
     
-    def pad_spec(self, spectrogram):  # [T, ~] → [T*, ~*]
+    def pad_spec(self, spectrogram, do_pad):  # [T, ~] → [T*, ~*]
         n_frames = spectrogram.shape[0]
         p = self.target_length - n_frames
         # cut and pad
@@ -189,15 +191,14 @@ class AudioDataProcessor():
             spectrogram = m(spectrogram)  # [T*, ~] 뒷 시간 늘림
         elif p < 0:
             spectrogram = spectrogram[0 : self.target_length, :]  # [T*, ~] 뒷 시간 줄임
-        if spectrogram.size(-1) % 2 != 0:
+        if (spectrogram.size(-1) % 2 != 0) and do_pad:
             spectrogram = spectrogram[..., :-1]  # ~ 가 odd면, -1
         return spectrogram, p
 
     def postprocess_spec(self, spectrogram, do_pad=True):  # [1, ~, T] -> [T*, ~*]
         spec = spectrogram[0]  # [~, T]
         spec = spec.T.float()  # [T, ~]
-        if do_pad:
-            spec, p = self.pad_spec(spec)  # [T*, ~*]
+        spec, p = self.pad_spec(spec, do_pad)  # [T*, ~*]
         return spec, p
 
     def reversing_stft(self, stft):
@@ -211,7 +212,8 @@ class AudioDataProcessor():
     def wav_feature_extraction(self, waveform, pad_stft=False):  # wav: np[C,N] → logmel: ts[1,1,T,M] / stft: ts[1,1,T,F]
         waveform = waveform[0, ...]  # 다채널 방지 / np[samples,] = (163840,)
         waveform = torch.FloatTensor(waveform).unsqueeze(0).to(self.device)  # ts[1, samples]
-        log_mel_spec, stft, stft_c = self.waveform_to_stft_to_mel(waveform)  # ts[1, M:64, T:1024~] / ts[1, F:513, T:1024~] / ts[1, F:513, T:1024~]
+        stft, stft_c = self.waveform_to_stft(waveform)  # ts[1, F:513, T:1024~] / ts[1, F:513, T:1024~]
+        log_mel_spec, stft, stft_c = self.stft_to_mel(stft, stft_c)  # ts[1, M:64, T:1024~] / ts[1, F:513, T:1024~] / ts[1, F:513, T:1024~]
         log_mel_spec, p = self.postprocess_spec(log_mel_spec)  # ts[T:1024, M:64]
         stft, p = self.postprocess_spec(stft, do_pad=pad_stft)  # ts[T:1024, F:512]
 
@@ -219,7 +221,7 @@ class AudioDataProcessor():
 
     # --------------------------------------------------------------------------------------------- #
 
-    def read_audio_file(self, filename):  # → ts[t,mel], ts[t,freq], ts[C,samples]
+    def read_audio_file(self, filename, pad_stft=False):  # → ts[t,mel], ts[t,freq], ts[C,samples]
         # 1. 오디오 파일 로드 또는 빈 파형 생성
         if os.path.exists(filename):
             waveform, random_start = self.read_wav_file(filename)  # np[C,samples], int
@@ -230,7 +232,7 @@ class AudioDataProcessor():
         waveform = torch.FloatTensor(waveform)
 
         # 2. 특성 추출 (stft spec, log mel spec)
-        log_mel_spec, stft, stft_c = (None, None, None) if self.waveform_only else self.wav_feature_extraction(waveform, pad_stft=True)  # input: [1,N]
+        log_mel_spec, stft, stft_c = (None, None, None) if self.waveform_only else self.wav_feature_extraction(waveform, pad_stft=pad_stft)  # input: [1,N]
         return log_mel_spec, stft, stft_c, waveform, random_start  # ts[1,1,T,M] / ts[1,1,T,F] / ts[1, F:513, T:1024~] / ts[1,N]
 
     # --------------------------------------------------------------------------------------------- #
