@@ -191,73 +191,71 @@ class AudioCapsEvaluator:
         raise ValueError
         '''
 
+        lists = [10, 100, 500, 1000]
+
 ################################################
-        for i in range(10):
+        
+
+        src_path = './samples/best_samples/A_cat_meowing.wav'
+        mixed_path = './mse1000.wav'
+
+        _, _, _, wav_src, _ = processor.read_audio_file(src_path, pad_stft=False)
+        mel_mix, stft_mix, stft_complex_mix, wav_mix, _ = processor.read_audio_file(mixed_path)
+        
+
+        wav_src = wav_src.squeeze(0).data.cpu().numpy()
+        wav_mix = wav_mix.squeeze(0).data.cpu().numpy()
+
+        sdr_no_sep = calculate_sdr(ref=wav_src, est=wav_mix)
+        sdr = calculate_sdr(ref=wav_src, est=wav_mix)
+        sdri = sdr - sdr_no_sep
+        sisdr = calculate_sisdr(ref=wav_src, est=wav_mix)
+        print(sisdr, sdri)
+
+
+        for param in aldm.parameters():
+            param.requires_grad = False  # 모든 파라미터를 학습 불가능하게 고정
+
+        mel_tar_samples = []
+        for ii in tqdm(range(30)):
+            mel_sample = aldm.edit_audio_with_ddim(
+                                mel=mel_mix,
+                                text=str(f'A cat meowing'),
+                                duration=10.24,
+                                batch_size=1,
+                                transfer_strength=0.3,
+                                guidance_scale=2.5,
+                                ddim_steps=50,
+                                clipping = False,
+                                return_type="mel",
+                            )
+            
+            mel_tar_samples.append(mel_sample)
+
+            wav_sample = processor.inverse_mel_with_phase(
+                        mel_sample,
+                        stft_complex_mix[:,:,:1024],
+                    )
+
+            pad_size = 432
+            if wav_sample.shape[-1] > pad_size*2:
+                wav_sample = wav_sample[..., pad_size:-pad_size]  # shape [B, samples]
+            else:
+                # 혹시 길이가 매우 짧다면 예외처리
+                wav_sample = wav_sample[..., 0:1]
+
+            wav_sep = wav_sample.squeeze(0).data.cpu().numpy()
+
+            sf.write(f'./edit{ii}.wav', wav_sep, 16000)
+
+        # mel_tar = torch.stack(mel_tar_samples).mean(dim=0)  # 평균 계산
+        mel_tar = torch.stack(mel_tar_samples)  # 평균 계산
+
+        for iii in lists:
             mask = Mask(device, 1, 513, 1024)
             criterion = nn.MSELoss()
             optimizer = optim.Adam(mask.parameters(), lr=0.01)
-
-            src_path = './samples/best_samples/A_cat_meowing.wav'
-            mixed_path = './a_cat_n_stepping_wood.wav'
-
-            _, _, _, wav_src, _ = processor.read_audio_file(src_path, pad_stft=False)
-            mel_mix, stft_mix, stft_complex_mix, wav_mix, _ = processor.read_audio_file(mixed_path)
-            
-
-            wav_src = wav_src.squeeze(0).data.cpu().numpy()
-            wav_mix = wav_mix.squeeze(0).data.cpu().numpy()
-
-            sdr_no_sep = calculate_sdr(ref=wav_src, est=wav_mix)
-            sdr = calculate_sdr(ref=wav_src, est=wav_mix)
-            sdri = sdr - sdr_no_sep
-            sisdr = calculate_sisdr(ref=wav_src, est=wav_mix)
-            print(sisdr, sdri)
-
-
-            for param in aldm.parameters():
-                param.requires_grad = False  # 모든 파라미터를 학습 불가능하게 고정
-
-            mel_tar_samples = []
-            for ii in tqdm(range(3)):
-                mel_sample = aldm.edit_audio_with_ddim(
-                                    mel=mel_mix,
-                                    text=str(f'A cat meowing'),
-                                    duration=10.24,
-                                    batch_size=1,
-                                    transfer_strength=0.5,
-                                    guidance_scale=2.5,
-                                    ddim_steps=200,
-                                    clipping = False,
-                                    return_type="mel",
-                                )
-                mel_tar_samples.append(mel_sample)
-
-                wav_sample = processor.inverse_mel_with_phase(
-                            mel_sample,
-                            stft_complex_mix[:,:,:1024],
-                        )
-
-                pad_size = 432
-                if wav_sample.shape[-1] > pad_size*2:
-                    wav_sample = wav_sample[..., pad_size:-pad_size]  # shape [B, samples]
-                else:
-                    # 혹시 길이가 매우 짧다면 예외처리
-                    wav_sample = wav_sample[..., 0:1]
-
-                wav_sep = wav_sample.squeeze(0).data.cpu().numpy()
-
-                sf.write(f'./edit{ii}.wav', wav_sep, 16000)
-
-
-
-
-
-
-            # mel_tar = torch.stack(mel_tar_samples).mean(dim=0)  # 평균 계산
-            mel_tar = torch.stack(mel_tar_samples)  # 평균 계산
-
-        
-            num_epochs = 3000
+            num_epochs = iii
             for epoch in range(num_epochs):
 
                 optimizer.zero_grad()  # 그래디언트 초기화
@@ -318,14 +316,13 @@ class AudioCapsEvaluator:
 
             wav_sep = estimated_wav.squeeze(0).data.cpu().numpy()
 
-            sf.write('./mse.wav', wav_sep, 16000)
+            sf.write(f'./mse{iii}.wav', wav_sep, 16000)
 
             # wav_src = wav_src.squeeze(0).data.cpu().numpy()
             # wav_mix = wav_mix.squeeze(0).data.cpu().numpy()
 
             assert len(wav_sep) <= len(wav_mix), len(wav_sep)
             wav_src = wav_src[:len(wav_sep)]
-
             wav_mix = wav_mix[:len(wav_sep)]
 
             sdr_no_sep = calculate_sdr(ref=wav_src, est=wav_mix)
@@ -334,6 +331,8 @@ class AudioCapsEvaluator:
             sisdr = calculate_sisdr(ref=wav_src, est=wav_sep)
 
             print(sisdr, sdri)
+
+
 ################################################
         raise ValueError
 ################################################
